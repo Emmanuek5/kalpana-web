@@ -28,6 +28,7 @@ model User {
   sessions            Session[]
   accounts            Account[]
   presets             Preset[]
+  domains             Domain[]
   
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
@@ -101,6 +102,7 @@ model Workspace {
   
   // Relations
   messages        Message[]
+  deployments     Deployment[]
   
   // Metadata
   lastAccessedAt  DateTime        @default(now())
@@ -153,4 +155,117 @@ model Message {
   
   @@index([workspaceId])
   @@index([createdAt])
+}
+
+enum DeploymentStatus {
+  STOPPED
+  BUILDING
+  DEPLOYING
+  RUNNING
+  STOPPING
+  ERROR
+}
+
+model Build {
+  id              String      @id @default(auto()) @map("_id") @db.ObjectId
+  deploymentId    String      @db.ObjectId
+  deployment      Deployment  @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  
+  status          BuildStatus @default(PENDING)
+  logs            String?     // Build logs
+  errorMessage    String?     // Error message if build failed
+  
+  // GitHub integration
+  commitHash      String?
+  commitMessage   String?
+  branch          String?
+  triggeredBy     String?     // "manual", "webhook", "auto"
+  
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime    @default(now())
+  
+  @@index([deploymentId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum BuildStatus {
+  PENDING
+  BUILDING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+model Domain {
+  id              String      @id @default(auto()) @map("_id") @db.ObjectId
+  domain          String      @unique
+  verified        Boolean     @default(false)
+  isDefault       Boolean     @default(false)
+  
+  // DNS verification
+  verificationToken String?   @unique
+  verifiedAt      DateTime?
+  
+  // SSL/TLS
+  sslEnabled      Boolean     @default(false)
+  
+  // User relation
+  userId          String      @db.ObjectId
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  deployments     Deployment[] @relation("DeploymentDomain")
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  
+  @@index([userId])
+  @@index([verified])
+}
+
+model Deployment {
+  id              String            @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  description     String?
+  
+  // Container metadata
+  containerId     String?
+  port            Int?              // Application port inside container
+  exposedPort     Int?              // Host port (if no base URL)
+  status          DeploymentStatus  @default(STOPPED)
+  
+  // Build configuration
+  buildCommand    String?           // e.g., "npm run build"
+  startCommand    String            // e.g., "npm start"
+  workingDir      String?           // Directory to run commands in
+  envVars         String?           // JSON stringified environment variables
+  
+  // Network configuration
+  subdomain       String?           // Subdomain for this deployment
+  domainId        String?           @db.ObjectId
+  domain          Domain?           @relation("DeploymentDomain", fields: [domainId], references: [id], onDelete: SetNull)
+  customDomain    String?           // Full custom domain if not using subdomain
+  
+  // Auto-rebuild settings
+  autoRebuild     Boolean           @default(false)
+  webhookSecret   String?           // GitHub webhook secret
+  
+  // Workspace relation
+  workspaceId     String            @db.ObjectId
+  workspace       Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  builds          Build[]
+  
+  // Metadata
+  lastDeployedAt  DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  @@index([workspaceId])
+  @@index([status])
+  @@index([subdomain])
+  @@index([domainId])
 }

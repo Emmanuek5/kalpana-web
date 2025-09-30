@@ -11,6 +11,9 @@ import {
   ChevronLeft,
   ChevronRight,
   User,
+  Globe,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "./ui/button";
@@ -19,6 +22,9 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
+  const [settingsExpanded, setSettingsExpanded] = useState(
+    pathname.startsWith("/dashboard/settings")
+  );
 
   const handleLogout = async () => {
     await signOut();
@@ -38,11 +44,20 @@ export function Sidebar() {
       icon: Settings,
       active: pathname === "/dashboard/presets",
     },
+  ];
+
+  const settingsItems = [
     {
       name: "Settings",
       href: "/dashboard/settings",
       icon: User,
       active: pathname === "/dashboard/settings",
+    },
+    {
+      name: "Domains",
+      href: "/dashboard/settings/domains",
+      icon: Globe,
+      active: pathname === "/dashboard/settings/domains",
     },
   ];
 
@@ -100,6 +115,64 @@ export function Sidebar() {
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 {!collapsed && <span>{item.name}</span>}
+              </button>
+            );
+          })}
+
+          {/* Settings Section with Submenu */}
+          {!collapsed && (
+            <div>
+              <button
+                onClick={() => setSettingsExpanded(!settingsExpanded)}
+                className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-100"
+              >
+                <div className="flex items-center gap-3">
+                  <Settings className="h-4 w-4 shrink-0" />
+                  <span>Settings</span>
+                </div>
+                {settingsExpanded ? (
+                  <ChevronUp className="h-3 w-3" />
+                ) : (
+                  <ChevronDown className="h-3 w-3" />
+                )}
+              </button>
+              {settingsExpanded && (
+                <div className="ml-6 mt-1 space-y-1">
+                  {settingsItems.map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <button
+                        key={item.name}
+                        onClick={() => router.push(item.href)}
+                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                          item.active
+                            ? "bg-emerald-500/10 text-emerald-400"
+                            : "text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-100"
+                        }`}
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0" />
+                        <span>{item.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          {collapsed && settingsItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.name}
+                onClick={() => router.push(item.href)}
+                className={`w-full flex items-center justify-center px-0 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  item.active
+                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                    : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-100"
+                }`}
+                title={item.name}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
               </button>
             );
           })}

@@ -31,6 +31,7 @@ import { WorkspaceHeader } from "@/components/workspace/workspace-header";
 import { WorkspaceEditor } from "@/components/workspace/workspace-editor";
 import { AIAgentPanel } from "@/components/workspace/ai-agent-panel";
 import { DiagnosticsDialog } from "@/components/workspace/diagnostics-dialog";
+import { DeploymentsPanel } from "@/components/workspace/deployments-panel";
 
 // Custom scrollbar styles
 const scrollbarStyles = `
@@ -134,6 +135,7 @@ export default function WorkspacePage({
   const [restarting, setRestarting] = useState(false);
   const [rebuildLogs, setRebuildLogs] = useState<string[]>([]);
   const [rebuildStage, setRebuildStage] = useState<string>("");
+  const [activeTab, setActiveTab] = useState<"ai" | "deployments">("ai");
 
   // Handler for opening files in editor
   const handleOpenFile = (filePath: string) => {
@@ -908,25 +910,58 @@ export default function WorkspacePage({
             />
           </div>
 
-          {/* AI Agent Panel - Side by side with flex */}
-          <AIAgentPanel
-            workspaceId={workspace.id}
-            messages={messages}
-            input={inputMessage}
-            setInput={setInputMessage}
-            handleSend={handleSendMessage}
-            isStreaming={isStreaming}
-            favoriteModels={favoriteModels}
-            selectedModel={selectedModel}
-            setSelectedModel={setSelectedModel}
-            expandedTools={expandedTools}
-            setExpandedTools={setExpandedTools}
-            expandedReasoning={expandedReasoning}
-            setExpandedReasoning={setExpandedReasoning}
-            handleOpenFile={handleOpenFile}
-            renderTextWithFileLinks={renderTextWithFileLinks}
-            onClearHistory={clearChatHistory}
-          />
+          {/* Right Panel with Tabs */}
+          <div className="w-[500px] flex flex-col bg-black/40 border-l border-zinc-800">
+            {/* Tab Headers */}
+            <div className="flex border-b border-zinc-800 bg-zinc-950/50">
+              <button
+                onClick={() => setActiveTab("ai")}
+                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+                  activeTab === "ai"
+                    ? "text-emerald-400 border-b-2 border-emerald-500"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                AI Agent
+              </button>
+              <button
+                onClick={() => setActiveTab("deployments")}
+                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+                  activeTab === "deployments"
+                    ? "text-emerald-400 border-b-2 border-emerald-500"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                Deployments
+              </button>
+            </div>
+
+            {/* Tab Content */}
+            <div className="flex-1 overflow-hidden">
+              {activeTab === "ai" ? (
+                <AIAgentPanel
+                  workspaceId={workspace.id}
+                  messages={messages}
+                  input={inputMessage}
+                  setInput={setInputMessage}
+                  handleSend={handleSendMessage}
+                  isStreaming={isStreaming}
+                  favoriteModels={favoriteModels}
+                  selectedModel={selectedModel}
+                  setSelectedModel={setSelectedModel}
+                  expandedTools={expandedTools}
+                  setExpandedTools={setExpandedTools}
+                  expandedReasoning={expandedReasoning}
+                  setExpandedReasoning={setExpandedReasoning}
+                  handleOpenFile={handleOpenFile}
+                  renderTextWithFileLinks={renderTextWithFileLinks}
+                  onClearHistory={clearChatHistory}
+                />
+              ) : (
+                <DeploymentsPanel workspaceId={workspace.id} />
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </>
