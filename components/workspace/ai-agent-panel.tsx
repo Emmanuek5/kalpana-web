@@ -314,380 +314,391 @@ export function AIAgentPanel({
   };
 
   return (
-    <div className="w-full h-full shrink-0 bg-gradient-to-b from-black via-zinc-950 to-black backdrop-blur-2xl flex flex-col shadow-2xl overflow-hidden">
-      {/* Agent Header */}
-      <div className="px-6 py-4 border-b border-zinc-800/50 shrink-0 bg-zinc-950/50">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-emerald-500/20 to-emerald-600/10 border border-emerald-900/30 flex items-center justify-center">
-                <Brain className="h-4 w-4 text-emerald-500" />
-              </div>
-              <div className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse ring-2 ring-black" />
-            </div>
-            <div>
-              <div className="text-sm font-semibold text-zinc-100">
-                AI Assistant
-              </div>
-              <div className="text-xs text-zinc-600">Always ready to help</div>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {favoriteModels.length > 0 && (
-              <select
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="text-xs bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-400 focus:outline-none focus:border-emerald-500/50"
-              >
-                {favoriteModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            {messages.length > 0 && onClearHistory && (
-              <Button
-                onClick={onClearHistory}
-                size="sm"
-                variant="ghost"
-                className="h-7 px-2 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
-                title="Clear chat history"
-              >
-                <BrushCleaning className="h-3.5 w-3.5" />
-              </Button>
-            )}
-          </div>
+    <div className="w-full h-full shrink-0 bg-zinc-950 flex flex-col shadow-2xl overflow-hidden">
+      {/* Minimalist Header */}
+      <div className="px-4 py-3 border-b border-zinc-800/30 shrink-0 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Brain className="h-4 w-4 text-emerald-500" />
+          <span className="text-sm font-medium text-zinc-300">AI Agent</span>
         </div>
+        {messages.length > 0 && onClearHistory && (
+          <button
+            onClick={onClearHistory}
+            className="h-7 px-2 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-colors"
+            title="Clear chat history"
+          >
+            <BrushCleaning className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 space-y-4 scrollbar-thin">
+      {/* Messages - Centered Single Column */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 scrollbar-thin">
         {messages.length === 0 ? (
           <div className="h-full flex items-center justify-center">
-            <div className="text-center">
-              <div className="mb-4 text-4xl text-zinc-800">⚡</div>
-              <p className="text-xs text-zinc-600">Agent ready to assist</p>
+            <div className="text-center max-w-md">
+              <div className="mb-3 text-3xl">⚡</div>
+              <p className="text-sm text-zinc-500">
+                Agent ready to assist with your tasks
+              </p>
             </div>
           </div>
         ) : (
-          messages.map((message) => (
-            <div key={message.id} className="space-y-3">
-              {message.role === "user" && (
-                <div className="flex justify-end">
-                  <div className="bg-emerald-900/20 border border-emerald-900/30 rounded-lg px-4 py-2.5 max-w-[85%]">
-                    <p className="text-sm text-zinc-200">
+          <div className="max-w-3xl mx-auto space-y-6">
+            {messages.map((message) => (
+              <div key={message.id} className="space-y-3">
+                {/* User Messages */}
+                {message.role === "user" && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="h-5 w-5 rounded-md bg-zinc-800/50 flex items-center justify-center">
+                        <span className="text-[10px] text-zinc-400">You</span>
+                      </div>
+                    </div>
+                    <div className="text-sm text-zinc-200 leading-relaxed">
                       {message.parts
                         .filter((p) => p.type === "text")
                         .map((p: any) => p.text)
                         .join("\n")}
-                    </p>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {message.role === "assistant" && (
-                <div className="space-y-2">
-                  {message.parts.map((part, partIdx) => {
-                    // Render text parts
-                    if (part.type === "text" && (part as any).text) {
-                      const textPart = part as Extract<
-                        MessagePart,
-                        { type: "text" }
-                      >;
-                      return (
-                        <div key={partIdx} className="text-sm text-zinc-300">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            rehypePlugins={[rehypeHighlight]}
-                            components={{
-                              p: ({ children }) => (
-                                <p className="mb-3 leading-relaxed">
-                                  {renderTextWithFileLinks(
-                                    children?.toString() || ""
-                                  )}
-                                </p>
-                              ),
-                              code: ({ inline, children, ...props }: any) =>
-                                inline ? (
-                                  <code
-                                    className="px-1.5 py-0.5 bg-zinc-800 text-emerald-400 rounded text-xs font-mono"
-                                    {...props}
-                                  >
-                                    {children}
-                                  </code>
-                                ) : (
-                                  <code
-                                    className="block bg-zinc-900 p-3 rounded my-2 text-xs overflow-x-auto"
-                                    {...props}
-                                  >
-                                    {children}
-                                  </code>
+                {/* Assistant Messages */}
+                {message.role === "assistant" && (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="h-5 w-5 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                        <Brain className="h-3 w-3 text-emerald-500" />
+                      </div>
+                      <span className="text-[10px] text-zinc-500 font-medium">
+                        Agent
+                      </span>
+                    </div>
+                    {message.parts.map((part, partIdx) => {
+                      // Render text parts
+                      if (part.type === "text" && (part as any).text) {
+                        const textPart = part as Extract<
+                          MessagePart,
+                          { type: "text" }
+                        >;
+                        return (
+                          <div key={partIdx} className="text-sm text-zinc-300">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              rehypePlugins={[rehypeHighlight]}
+                              components={{
+                                p: ({ children }) => (
+                                  <p className="mb-3 leading-relaxed">
+                                    {renderTextWithFileLinks(
+                                      children?.toString() || ""
+                                    )}
+                                  </p>
                                 ),
-                              pre: ({ children }) => (
-                                <pre className="bg-zinc-900 border border-zinc-800 rounded p-3 my-2 overflow-x-auto">
-                                  {children}
-                                </pre>
-                              ),
-                              ul: ({ children }) => (
-                                <ul className="list-disc list-inside mb-3 space-y-1">
-                                  {children}
-                                </ul>
-                              ),
-                              ol: ({ children }) => (
-                                <ol className="list-decimal list-inside mb-3 space-y-1">
-                                  {children}
-                                </ol>
-                              ),
-                              li: ({ children }) => (
-                                <li className="text-zinc-400">{children}</li>
-                              ),
-                              h1: ({ children }) => (
-                                <h1 className="text-lg font-bold text-zinc-100 mb-2 mt-4">
-                                  {children}
-                                </h1>
-                              ),
-                              h2: ({ children }) => (
-                                <h2 className="text-base font-semibold text-zinc-100 mb-2 mt-3">
-                                  {children}
-                                </h2>
-                              ),
-                              h3: ({ children }) => (
-                                <h3 className="text-sm font-semibold text-zinc-200 mb-1 mt-2">
-                                  {children}
-                                </h3>
-                              ),
-                              blockquote: ({ children }) => (
-                                <blockquote className="border-l-2 border-emerald-500/50 pl-3 py-1 my-2 text-zinc-400 italic">
-                                  {children}
-                                </blockquote>
-                              ),
-                            }}
-                          >
-                            {textPart.text}
-                          </ReactMarkdown>
-                        </div>
-                      );
-                    }
+                                code: ({ inline, children, ...props }: any) =>
+                                  inline ? (
+                                    <code
+                                      className="px-1.5 py-0.5 bg-zinc-800/50 text-emerald-400 rounded text-xs font-mono"
+                                      {...props}
+                                    >
+                                      {children}
+                                    </code>
+                                  ) : (
+                                    <code
+                                      className="block bg-zinc-900/50 p-3 rounded-lg my-2 text-xs overflow-x-auto border border-zinc-800/30"
+                                      {...props}
+                                    >
+                                      {children}
+                                    </code>
+                                  ),
+                                pre: ({ children }) => (
+                                  <pre className="bg-zinc-900/50 border border-zinc-800/30 rounded-lg p-3 my-2 overflow-x-auto">
+                                    {children}
+                                  </pre>
+                                ),
+                                ul: ({ children }) => (
+                                  <ul className="list-disc list-inside mb-3 space-y-1">
+                                    {children}
+                                  </ul>
+                                ),
+                                ol: ({ children }) => (
+                                  <ol className="list-decimal list-inside mb-3 space-y-1">
+                                    {children}
+                                  </ol>
+                                ),
+                                li: ({ children }) => (
+                                  <li className="text-zinc-400">{children}</li>
+                                ),
+                                h1: ({ children }) => (
+                                  <h1 className="text-lg font-bold text-zinc-100 mb-2 mt-4">
+                                    {children}
+                                  </h1>
+                                ),
+                                h2: ({ children }) => (
+                                  <h2 className="text-base font-semibold text-zinc-100 mb-2 mt-3">
+                                    {children}
+                                  </h2>
+                                ),
+                                h3: ({ children }) => (
+                                  <h3 className="text-sm font-semibold text-zinc-200 mb-1 mt-2">
+                                    {children}
+                                  </h3>
+                                ),
+                                blockquote: ({ children }) => (
+                                  <blockquote className="border-l-2 border-emerald-500/30 pl-3 py-1 my-2 text-zinc-400 italic">
+                                    {children}
+                                  </blockquote>
+                                ),
+                              }}
+                            >
+                              {textPart.text}
+                            </ReactMarkdown>
+                          </div>
+                        );
+                      }
 
-                    // Render tool calls with sleek design
-                    if (
-                      part.type === "tool" &&
-                      (part as any).state === "output-available"
-                    ) {
-                      const toolPart = part as Extract<
-                        MessagePart,
-                        { type: "tool" }
-                      >;
-                      const isExpanded = expandedTools.has(toolPart.toolCallId);
-                      const IconComponent =
-                        TOOL_ICONS[toolPart.toolName] || TerminalIcon;
+                      // Render tool calls with minimal design
+                      if (
+                        part.type === "tool" &&
+                        (part as any).state === "output-available"
+                      ) {
+                        const toolPart = part as Extract<
+                          MessagePart,
+                          { type: "tool" }
+                        >;
+                        const isExpanded = expandedTools.has(
+                          toolPart.toolCallId
+                        );
+                        const IconComponent =
+                          TOOL_ICONS[toolPart.toolName] || TerminalIcon;
 
-                      return (
-                        <div
-                          key={partIdx}
-                          className="group relative bg-gradient-to-r from-zinc-900/40 to-zinc-900/20 border border-zinc-800/40 rounded-lg overflow-hidden hover:border-emerald-500/30 transition-all"
-                        >
-                          <button
-                            onClick={() =>
-                              setExpandedTools((prev) => {
-                                const newSet = new Set(prev);
-                                if (newSet.has(toolPart.toolCallId)) {
-                                  newSet.delete(toolPart.toolCallId);
-                                } else {
-                                  newSet.add(toolPart.toolCallId);
-                                }
-                                return newSet;
-                              })
-                            }
-                            className="w-full px-3 py-2.5 flex items-center gap-3 text-left"
+                        return (
+                          <div
+                            key={partIdx}
+                            className="group relative bg-zinc-900/30 border border-zinc-800/40 rounded-lg overflow-hidden hover:border-zinc-700/60 transition-colors"
                           >
-                            <div className="h-6 w-6 rounded-md bg-gradient-to-br from-emerald-500/20 to-emerald-600/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
-                              <IconComponent className="h-3.5 w-3.5 text-emerald-400" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <span className="text-xs font-medium text-zinc-300 block">
-                                {toolPart.toolName
-                                  .replace(/([A-Z])/g, " $1")
-                                  .trim()}
-                              </span>
-                              {toolPart.input && (
-                                <span className="text-[10px] text-zinc-600 truncate block mt-0.5">
-                                  {Object.entries(toolPart.input)
-                                    .slice(0, 2)
-                                    .map(([k, v]) => `${k}: ${v}`)
-                                    .join(", ")}
+                            <button
+                              onClick={() =>
+                                setExpandedTools((prev) => {
+                                  const newSet = new Set(prev);
+                                  if (newSet.has(toolPart.toolCallId)) {
+                                    newSet.delete(toolPart.toolCallId);
+                                  } else {
+                                    newSet.add(toolPart.toolCallId);
+                                  }
+                                  return newSet;
+                                })
+                              }
+                              className="w-full px-3 py-2 flex items-center gap-2.5 text-left"
+                            >
+                              <div className="h-5 w-5 rounded bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                                <IconComponent className="h-3 w-3 text-emerald-500" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <span className="text-xs font-medium text-zinc-400 block">
+                                  {toolPart.toolName
+                                    .replace(/([A-Z])/g, " $1")
+                                    .trim()}
                                 </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                              {isExpanded ? (
-                                <ChevronUp className="h-3.5 w-3.5 text-zinc-500 group-hover:text-zinc-400 transition-colors" />
-                              ) : (
-                                <ChevronDown className="h-3.5 w-3.5 text-zinc-500 group-hover:text-zinc-400 transition-colors" />
-                              )}
-                            </div>
-                          </button>
-                          {isExpanded && (
-                            <div className="px-3 pb-3 border-t border-zinc-800/30 bg-black/20">
-                              {toolPart.input &&
-                                Object.keys(toolPart.input).length > 0 && (
-                                  <div className="mt-3">
-                                    <div className="text-[10px] font-semibold text-emerald-500/70 mb-1.5 tracking-wide">
-                                      INPUT
-                                    </div>
-                                    <div className="text-xs text-zinc-400 bg-zinc-950/50 border border-zinc-800/30 p-2.5 rounded-md overflow-auto max-h-32 font-mono">
-                                      {JSON.stringify(toolPart.input, null, 2)}
-                                    </div>
-                                  </div>
+                                {toolPart.input && (
+                                  <span className="text-[10px] text-zinc-600 truncate block mt-0.5">
+                                    {Object.entries(toolPart.input)
+                                      .slice(0, 2)
+                                      .map(([k, v]) => `${k}: ${v}`)
+                                      .join(", ")}
+                                  </span>
                                 )}
-                              {toolPart.output && (
-                                <div className="mt-3">
-                                  <div className="text-[10px] font-semibold text-emerald-500/70 mb-1.5 tracking-wide">
-                                    OUTPUT
-                                  </div>
-                                  <div className="text-xs text-zinc-400 bg-zinc-950/50 border border-zinc-800/30 p-2.5 rounded-md overflow-auto max-h-40 font-mono whitespace-pre-wrap">
-                                    {typeof toolPart.output === "string"
-                                      ? toolPart.output
-                                      : JSON.stringify(
-                                          toolPart.output,
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                {isExpanded ? (
+                                  <ChevronUp className="h-3 w-3 text-zinc-600" />
+                                ) : (
+                                  <ChevronDown className="h-3 w-3 text-zinc-600" />
+                                )}
+                              </div>
+                            </button>
+                            {isExpanded && (
+                              <div className="px-3 pb-3 border-t border-zinc-800/30 bg-black/10">
+                                {toolPart.input &&
+                                  Object.keys(toolPart.input).length > 0 && (
+                                    <div className="mt-2">
+                                      <div className="text-[10px] font-semibold text-emerald-500/70 mb-1 tracking-wide">
+                                        INPUT
+                                      </div>
+                                      <div className="text-xs text-zinc-400 bg-zinc-950/50 border border-zinc-800/30 p-2 rounded overflow-auto max-h-32 font-mono">
+                                        {JSON.stringify(
+                                          toolPart.input,
                                           null,
                                           2
                                         )}
+                                      </div>
+                                    </div>
+                                  )}
+                                {toolPart.output && (
+                                  <div className="mt-2">
+                                    <div className="text-[10px] font-semibold text-emerald-500/70 mb-1 tracking-wide">
+                                      OUTPUT
+                                    </div>
+                                    <div className="text-xs text-zinc-400 bg-zinc-950/50 border border-zinc-800/30 p-2 rounded overflow-auto max-h-40 font-mono whitespace-pre-wrap">
+                                      {typeof toolPart.output === "string"
+                                        ? toolPart.output
+                                        : JSON.stringify(
+                                            toolPart.output,
+                                            null,
+                                            2
+                                          )}
+                                    </div>
                                   </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    }
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
 
-                    // Skip checkpoints (they're redundant with tool displays)
-                    // Skip reasoning, sources, and in-progress tools
-                    return null;
-                  })}
-                </div>
-              )}
-            </div>
-          ))
-        )}
+                      return null;
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
 
-        {/* Show "Processing..." when streaming but no text yet */}
-        {showProcessing && (
-          <div className="flex items-center gap-2 text-zinc-600 text-[11px] px-1">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            <span>Processing...</span>
+            {/* Show "Processing..." when streaming but no text yet */}
+            {showProcessing && (
+              <div className="flex items-center gap-2 text-zinc-600 text-xs">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>Processing...</span>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* Input */}
-      <div className="p-4 border-t border-zinc-800/50 shrink-0 bg-gradient-to-b from-zinc-950/50 to-zinc-950/80 backdrop-blur-sm">
-        {/* Attached Files */}
-        {attachedFiles.length > 0 && (
-          <div className="mb-3 flex flex-wrap gap-2">
-            {attachedFiles.map((file) => (
-              <div
-                key={file.path}
-                className="inline-flex items-center gap-2 px-3 py-1.5 bg-emerald-950/30 border border-emerald-800/50 rounded-lg text-xs backdrop-blur-sm"
-              >
-                <FileCode className="h-3 w-3 text-emerald-400" />
-                <span className="text-emerald-200">{file.name}</span>
-                <button
-                  onClick={() => removeAttachedFile(file.path)}
-                  className="hover:bg-emerald-900/50 rounded p-0.5 transition-colors"
+      {/* Input Area - Modern Style */}
+      <div className="p-4 border-t border-zinc-800/30 shrink-0">
+        <div className="max-w-3xl mx-auto">
+          {/* Attached Files */}
+          {attachedFiles.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {attachedFiles.map((file) => (
+                <div
+                  key={file.path}
+                  className="inline-flex items-center gap-1.5 px-2 py-1 bg-emerald-950/20 border border-emerald-800/30 rounded-md text-xs"
                 >
-                  <X className="h-3 w-3 text-emerald-400" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Attached Images */}
-        {attachedImages.length > 0 && (
-          <div className="mb-3 flex flex-wrap gap-2">
-            {attachedImages.map((image) => (
-              <div key={image.name} className="relative group inline-block">
-                <img
-                  src={`data:${image.mimeType};base64,${image.base64}`}
-                  alt={image.name}
-                  className="h-20 w-20 object-cover rounded-lg border border-blue-800/50"
-                />
-                <button
-                  onClick={() => removeAttachedImage(image.name)}
-                  className="absolute -top-2 -right-2 bg-blue-950 hover:bg-blue-900 border border-blue-700 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  <X className="h-3 w-3 text-blue-300" />
-                </button>
-                <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-1 py-0.5 text-[10px] text-blue-200 truncate rounded-b-lg">
-                  {image.name}
+                  <FileCode className="h-3 w-3 text-emerald-500" />
+                  <span className="text-emerald-300">{file.name}</span>
+                  <button
+                    onClick={() => removeAttachedFile(file.path)}
+                    className="hover:bg-emerald-900/30 rounded p-0.5 transition-colors"
+                  >
+                    <X className="h-2.5 w-2.5 text-emerald-500" />
+                  </button>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
 
-        {/* Textarea with inline buttons */}
-        <div className="relative">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={handleImageUpload}
-          />
-          <textarea
-            ref={inputRef}
-            rows={2}
-            value={input}
-            onChange={handleInputChange}
-            onKeyDown={(e) => {
-              if (
-                e.key === "Enter" &&
-                !e.shiftKey &&
-                !isStreaming &&
-                !showFilePicker
-              ) {
-                e.preventDefault();
-                handleSendWithContext();
-              }
-            }}
-            placeholder="Ask the AI agent anything... (@ for files, Shift+Enter for new line)"
-            disabled={isStreaming}
-            className="w-full bg-zinc-900/60 border border-zinc-800/80 rounded-2xl px-4 py-2.5 pb-12 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20 resize-none transition-all disabled:opacity-50 disabled:cursor-not-allowed scrollbar-thin"
-          />
+          {/* Attached Images */}
+          {attachedImages.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {attachedImages.map((image) => (
+                <div key={image.name} className="relative group inline-block">
+                  <img
+                    src={`data:${image.mimeType};base64,${image.base64}`}
+                    alt={image.name}
+                    className="h-16 w-16 object-cover rounded-lg border border-zinc-700/50"
+                  />
+                  <button
+                    onClick={() => removeAttachedImage(image.name)}
+                    className="absolute -top-1.5 -right-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <X className="h-2.5 w-2.5 text-zinc-400" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
 
-          {/* Bottom action bar inside textarea */}
-          <div className="absolute bottom-0 left-0 right-0 px-3 py-2 flex items-center justify-between mb-3">
-            {/* Left side - Attach button */}
-            <button
-              onClick={() => fileInputRef.current?.click()}
+          {/* Input with integrated controls */}
+          <div className="relative bg-zinc-900/50 border border-zinc-800/60 rounded-xl hover:border-zinc-700/80 focus-within:border-emerald-500/40 transition-colors">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={handleImageUpload}
+            />
+            <textarea
+              ref={inputRef}
+              rows={1}
+              value={input}
+              onChange={handleInputChange}
+              onKeyDown={(e) => {
+                if (
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  !isStreaming &&
+                  !showFilePicker
+                ) {
+                  e.preventDefault();
+                  handleSendWithContext();
+                }
+              }}
+              placeholder="Ask anything..."
               disabled={isStreaming}
-              className="h-8 px-3 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/50 hover:border-blue-500/50 flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed group mt-4"
-              title="Attach images (or paste)"
-            >
-              <Paperclip className="h-3.5 w-3.5 text-zinc-400 group-hover:text-blue-400 transition-colors" />
-            </button>
+              className="w-full bg-transparent px-4 py-3 pr-32 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none resize-none disabled:opacity-50 disabled:cursor-not-allowed scrollbar-thin"
+              style={{ minHeight: "44px", maxHeight: "200px" }}
+            />
 
-            {/* Right side - Send button */}
-            <Button
-              onClick={handleSendWithContext}
-              disabled={!input.trim() || isStreaming}
-              size="sm"
-              className="h-8 px-4 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white border-0 shadow-lg shadow-emerald-900/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-            >
-              {isStreaming ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <>
-                  <Send className="h-3.5 w-3.5 mr-1.5" />
-                </>
+            {/* Bottom right controls */}
+            <div className="absolute bottom-2 right-2 flex items-center gap-1">
+              {/* Attach button */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isStreaming}
+                className="h-7 w-7 rounded-lg hover:bg-zinc-800/80 flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed group"
+                title="Attach images"
+              >
+                <Paperclip className="h-3.5 w-3.5 text-zinc-500 group-hover:text-zinc-400" />
+              </button>
+
+              {/* Model Selector - Styled like reference */}
+              {favoriteModels.length > 0 && (
+                <div className="relative">
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="h-7 pl-2 pr-6 bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/50 rounded-lg text-[11px] text-zinc-400 font-medium appearance-none focus:outline-none focus:border-emerald-500/50 transition-colors cursor-pointer"
+                  >
+                    {favoriteModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-500 pointer-events-none" />
+                </div>
               )}
-            </Button>
+
+              {/* Send button */}
+              <button
+                onClick={handleSendWithContext}
+                disabled={!input.trim() || isStreaming}
+                className="h-7 w-7 bg-emerald-600/90 hover:bg-emerald-600 disabled:bg-zinc-800 disabled:opacity-50 rounded-lg flex items-center justify-center transition-colors disabled:cursor-not-allowed"
+              >
+                {isStreaming ? (
+                  <Loader2 className="h-3.5 w-3.5 text-white animate-spin" />
+                ) : (
+                  <Send className="h-3.5 w-3.5 text-white" />
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Hint text */}
+          <div className="mt-1.5 px-1 text-[10px] text-zinc-600">
+            Press Enter to send, Shift+Enter for new line, @ to mention files
           </div>
         </div>
 
