@@ -314,7 +314,7 @@ export function AIAgentPanel({
   };
 
   return (
-    <div className="w-[500px] shrink-0 border-l border-zinc-900/50 bg-gradient-to-b from-black via-zinc-950 to-black backdrop-blur-2xl flex flex-col shadow-2xl overflow-hidden">
+    <div className="w-full h-full shrink-0 bg-gradient-to-b from-black via-zinc-950 to-black backdrop-blur-2xl flex flex-col shadow-2xl overflow-hidden">
       {/* Agent Header */}
       <div className="px-6 py-4 border-b border-zinc-800/50 shrink-0 bg-zinc-950/50">
         <div className="flex items-center justify-between">

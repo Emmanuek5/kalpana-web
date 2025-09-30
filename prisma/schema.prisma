@@ -101,6 +101,7 @@ model Workspace {
   
   // Relations
   messages        Message[]
+  deployments     Deployment[]
   
   // Metadata
   lastAccessedAt  DateTime        @default(now())
@@ -153,4 +154,87 @@ model Message {
   
   @@index([workspaceId])
   @@index([createdAt])
+}
+
+model Deployment {
+  id              String            @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  description     String?
+  
+  // Container metadata
+  containerId     String?
+  port            Int?              // Application port inside container
+  exposedPort     Int?              // Host port (if no base URL)
+  status          DeploymentStatus  @default(STOPPED)
+  
+  // Build configuration
+  buildCommand    String?           // e.g., "npm run build"
+  startCommand    String            // e.g., "npm start"
+  workingDir      String?           // Directory to run commands in
+  envVars         String?           // JSON stringified environment variables
+  
+  // Traefik configuration
+  subdomain       String?           // Subdomain for this deployment
+  baseUrl         String?           // Base URL for subdomain routing
+  
+  // Auto-rebuild settings
+  autoRebuild     Boolean           @default(false)
+  webhookSecret   String?           // GitHub webhook secret
+  
+  // Workspace relation
+  workspaceId     String            @db.ObjectId
+  workspace       Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  builds          Build[]
+  
+  // Metadata
+  lastDeployedAt  DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  @@index([workspaceId])
+  @@index([status])
+  @@index([subdomain])
+}
+
+enum DeploymentStatus {
+  STOPPED
+  BUILDING
+  DEPLOYING
+  RUNNING
+  STOPPING
+  ERROR
+}
+
+model Build {
+  id              String      @id @default(auto()) @map("_id") @db.ObjectId
+  deploymentId    String      @db.ObjectId
+  deployment      Deployment  @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  
+  status          BuildStatus @default(PENDING)
+  logs            String?     // Build logs
+  errorMessage    String?     // Error message if build failed
+  
+  // GitHub integration
+  commitHash      String?
+  commitMessage   String?
+  branch          String?
+  triggeredBy     String?     // "manual", "webhook", "auto"
+  
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime    @default(now())
+  
+  @@index([deploymentId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum BuildStatus {
+  PENDING
+  BUILDING
+  SUCCESS
+  FAILED
+  CANCELLED
 }
