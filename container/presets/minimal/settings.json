@@ -1,0 +1,15 @@
+{
+  "workbench.colorTheme": "Visual Studio Dark",
+  "editor.fontSize": 14,
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.formatOnSave": true,
+  "editor.minimap.enabled": true,
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 1000,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "terminal.integrated.fontSize": 13,
+  "git.autofetch": true,
+  "git.confirmSync": false
+}

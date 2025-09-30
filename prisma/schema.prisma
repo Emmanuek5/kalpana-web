@@ -1,0 +1,156 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  String      @id @default(auto()) @map("_id") @db.ObjectId
+  email               String      @unique
+  name                String?
+  image               String?
+  emailVerified       Boolean     @default(false)
+  
+  // OAuth
+  githubId            String?     @unique
+  githubToken         String?     // Encrypted
+  
+  // OpenRouter settings
+  openrouterApiKey    String?     // User's personal OpenRouter API key
+  favoriteModels      String[]    @default([]) // Array of favorite model IDs (max 10)
+  defaultModel        String?     // Default model to use in chat
+  
+  // Relations
+  workspaces          Workspace[]
+  sessions            Session[]
+  accounts            Account[]
+  presets             Preset[]
+  
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+}
+
+model Session {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId       String   @db.ObjectId
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt    DateTime
+  token        String   @unique
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+model Account {
+  id                String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String   @db.ObjectId
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId         String
+  providerId        String
+  accessToken       String?
+  refreshToken      String?
+  idToken           String?
+  expiresAt         DateTime?
+  scope             String?
+  password          String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  
+  @@unique([identifier, value])
+}
+
+model Workspace {
+  id              String          @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  description     String?
+  
+  // Container metadata
+  containerId     String?
+  vscodePort      Int?
+  agentPort       Int?
+  status          WorkspaceStatus @default(STOPPED)
+  
+  // Configuration
+  githubRepo      String?
+  githubBranch    String?         @default("main")
+  nixConfig       String?
+  template        String?
+  preset          String?         @default("default")
+  
+  // User relation
+  userId          String          @db.ObjectId
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  messages        Message[]
+  
+  // Metadata
+  lastAccessedAt  DateTime        @default(now())
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@index([userId])
+  @@index([status])
+  @@index([lastAccessedAt])
+}
+
+enum WorkspaceStatus {
+  STOPPED
+  STARTING
+  RUNNING
+  STOPPING
+  ERROR
+}
+
+model Preset {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  description     String?
+  
+  // VS Code settings (JSON string)
+  settings        String   // JSON stringified settings.json
+  
+  // Extensions (array of extension IDs)
+  extensions      String[] @default([])
+  
+  // User relation
+  userId          String   @db.ObjectId
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+model Message {
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  workspaceId     String    @db.ObjectId
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  role            String    // "user" or "assistant"
+  content         String    // JSON stringified message parts array
+  
+  createdAt       DateTime  @default(now())
+  
+  @@index([workspaceId])
+  @@index([createdAt])
+}

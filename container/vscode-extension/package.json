@@ -1,0 +1,72 @@
+{
+  "name": "kalpana-diagnostics",
+  "displayName": "Kalpana Diagnostics Bridge",
+  "description": "Bridges VS Code diagnostics to Kalpana AI Agent",
+  "version": "0.0.1",
+  "publisher": "kalpana",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "kalpana.openFile",
+        "title": "Kalpana: Open File"
+      },
+      {
+        "command": "kalpana.runInTerminal",
+        "title": "Kalpana: Run Command in Terminal"
+      },
+      {
+        "command": "kalpana.getCodeActions",
+        "title": "Kalpana: Get Code Actions"
+      },
+      {
+        "command": "kalpana.applyCodeAction",
+        "title": "Kalpana: Apply Code Action"
+      },
+      {
+        "command": "kalpana.goToDefinition",
+        "title": "Kalpana: Go to Definition"
+      },
+      {
+        "command": "kalpana.findReferences",
+        "title": "Kalpana: Find References"
+      },
+      {
+        "command": "kalpana.searchSymbols",
+        "title": "Kalpana: Search Workspace Symbols"
+      },
+      {
+        "command": "kalpana.formatDocument",
+        "title": "Kalpana: Format Document"
+      },
+      {
+        "command": "kalpana.getHover",
+        "title": "Kalpana: Get Hover Information"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node"
+  },
+  "dependencies": {
+    "ws": "^8.14.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.0.0",
+    "esbuild": "^0.19.0"
+  }
+}

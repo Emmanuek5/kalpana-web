@@ -1,0 +1,16 @@
+{
+  "name": "kalpana-agent-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "bun run server.ts",
+    "start": "bun run server.ts"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.10",
+    "bun-types": "latest"
+  }
+}
