@@ -36,18 +36,30 @@ The deployment system allows you to:
 
 ## Getting Started
 
-### 1. Environment Variables
+### 1. Domain Management (Recommended)
 
-Add these to your `.env` file:
+For custom domain deployments:
+
+1. Navigate to **Settings → Domains** in the sidebar
+2. Click "Add Domain"
+3. Enter your domain name (e.g., `example.com`)
+4. Optionally set as default domain
+5. Add the provided TXT record to your DNS
+6. Click "Verify Domain"
+
+Once verified, your domain will be available for all deployments.
+
+### 2. Environment Variables (For Traefik)
+
+Add these to your `.env` file for Traefik auto-configuration:
 
 ```env
-# Required for subdomain routing (optional)
-TRAEFIK_BASE_URL=example.com
-TRAEFIK_EMAIL=admin@example.com
-
 # Traefik network (optional, defaults to traefik-proxy)
 TRAEFIK_NETWORK=traefik-proxy
+TRAEFIK_EMAIL=admin@example.com
 ```
+
+**Note**: With custom domain management, you no longer need `TRAEFIK_BASE_URL` as each user manages their own verified domains.
 
 ### 2. Create a Deployment
 

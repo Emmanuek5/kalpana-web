@@ -12,6 +12,7 @@ export interface DeploymentConfig {
   port: number; // Application port inside container
   envVars?: Record<string, string>;
   subdomain?: string;
+  domainId?: string;
   autoRebuild?: boolean;
 }
 
@@ -70,20 +71,60 @@ export class DeploymentManager {
     workspaceId: string,
     config: DeploymentConfig
   ): Promise<string> {
-    const baseUrl = process.env.TRAEFIK_BASE_URL;
+    let finalSubdomain = config.subdomain;
+    let domain = null;
 
-    // Validate subdomain if using Traefik
-    if (baseUrl && config.subdomain) {
-      // Check if subdomain is already in use
-      const existing = await prisma.deployment.findFirst({
-        where: {
-          subdomain: config.subdomain,
-          baseUrl: baseUrl,
-        },
+    // Get domain if domainId is provided
+    if (config.domainId) {
+      domain = await prisma.domain.findUnique({
+        where: { id: config.domainId },
       });
 
-      if (existing) {
-        throw new Error(`Subdomain "${config.subdomain}" is already in use`);
+      if (!domain || !domain.verified) {
+        throw new Error("Invalid or unverified domain");
+      }
+
+      // Auto-generate subdomain if not provided and domain is linked
+      if (!finalSubdomain) {
+        const { generateSubdomain } = await import("@/lib/subdomain-generator");
+        finalSubdomain = generateSubdomain();
+
+        // Ensure uniqueness
+        let attempts = 0;
+        while (attempts < 10) {
+          const existing = await prisma.deployment.findFirst({
+            where: {
+              subdomain: finalSubdomain,
+              domainId: config.domainId,
+            },
+          });
+
+          if (!existing) break;
+          finalSubdomain = generateSubdomain();
+          attempts++;
+        }
+
+        if (attempts === 10) {
+          throw new Error("Failed to generate unique subdomain");
+        }
+      } else {
+        // Validate subdomain if using domain
+        const { isValidSubdomain } = await import("@/lib/subdomain-generator");
+        if (!isValidSubdomain(finalSubdomain)) {
+          throw new Error("Invalid subdomain format");
+        }
+
+        // Check if subdomain is already in use for this domain
+        const existing = await prisma.deployment.findFirst({
+          where: {
+            subdomain: finalSubdomain,
+            domainId: config.domainId,
+          },
+        });
+
+        if (existing) {
+          throw new Error(`Subdomain "${finalSubdomain}" is already in use`);
+        }
       }
     }
 
@@ -102,8 +143,8 @@ export class DeploymentManager {
         workingDir: config.workingDir,
         port: config.port,
         envVars: config.envVars ? JSON.stringify(config.envVars) : undefined,
-        subdomain: config.subdomain,
-        baseUrl: baseUrl,
+        subdomain: finalSubdomain,
+        domainId: config.domainId,
         autoRebuild: config.autoRebuild || false,
         webhookSecret,
         status: "STOPPED",
@@ -245,11 +286,12 @@ export class DeploymentManager {
       }
     }
 
-    const baseUrl = deployment.baseUrl;
+    // Get domain info if domain is linked
+    const domain = deployment.domain;
     let exposedPort: number | undefined;
 
-    // Allocate port if not using Traefik
-    if (!baseUrl) {
+    // Allocate port if not using domain/Traefik
+    if (!domain) {
       const ports = await this.portManager.allocatePorts();
       exposedPort = ports.vscodePort; // Reuse port allocation logic
     }
@@ -268,13 +310,13 @@ export class DeploymentManager {
     // Generate container name
     const containerName = `deployment-${deploymentId}`;
 
-    // Generate Traefik labels if using subdomain routing
-    const labels = baseUrl && deployment.subdomain
+    // Generate Traefik labels if using domain/subdomain routing
+    const labels = domain && deployment.subdomain
       ? traefikManager.generateLabels(
           deploymentId,
           deployment.subdomain,
           deployment.port,
-          baseUrl
+          domain.domain
         )
       : {
           "kalpana.deployment.id": deploymentId,
@@ -299,8 +341,8 @@ export class DeploymentManager {
       },
     };
 
-    // Add port binding if not using Traefik
-    if (!baseUrl && exposedPort) {
+    // Add port binding if not using domain/Traefik
+    if (!domain && exposedPort) {
       containerConfig.HostConfig.PortBindings = {
         [`${deployment.port}/tcp`]: [{ HostPort: exposedPort.toString() }],
       };
@@ -311,11 +353,11 @@ export class DeploymentManager {
 
     onLog?.("Deployment container started");
 
-    // Connect to Traefik network if using subdomain routing
-    if (baseUrl && deployment.subdomain) {
+    // Connect to Traefik network if using domain/subdomain routing
+    if (domain && deployment.subdomain) {
       await traefikManager.ensureTraefik();
       await traefikManager.connectToNetwork(container.id);
-      onLog?.(`Configured subdomain: ${deployment.subdomain}.${baseUrl}`);
+      onLog?.(`Configured subdomain: ${deployment.subdomain}.${domain.domain}`);
     }
 
     // Update deployment record
@@ -353,7 +395,7 @@ export class DeploymentManager {
       const container = this.docker.getContainer(deployment.containerId);
 
       // Disconnect from Traefik network if connected
-      if (deployment.baseUrl && deployment.subdomain) {
+      if (deployment.domain && deployment.subdomain) {
         await traefikManager.disconnectFromNetwork(deployment.containerId);
       }
 

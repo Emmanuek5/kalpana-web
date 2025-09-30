@@ -90,6 +90,7 @@ export async function POST(
       port,
       envVars,
       subdomain,
+      domainId,
       autoRebuild,
     } = body;
 
@@ -99,6 +100,24 @@ export async function POST(
         { error: "Missing required fields: name, startCommand, port" },
         { status: 400 }
       );
+    }
+
+    // If domainId is provided, verify it belongs to the user
+    if (domainId) {
+      const domain = await prisma.domain.findFirst({
+        where: {
+          id: domainId,
+          userId: session.user.id,
+          verified: true,
+        },
+      });
+
+      if (!domain) {
+        return NextResponse.json(
+          { error: "Invalid or unverified domain" },
+          { status: 400 }
+        );
+      }
     }
 
     // Create deployment
@@ -111,11 +130,13 @@ export async function POST(
       port: parseInt(port),
       envVars,
       subdomain,
+      domainId,
       autoRebuild: autoRebuild || false,
     });
 
     const deployment = await prisma.deployment.findUnique({
       where: { id: deploymentId },
+      include: { domain: true },
     });
 
     return NextResponse.json({ deployment }, { status: 201 });

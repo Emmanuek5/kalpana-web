@@ -30,6 +30,13 @@ import {
   Copy,
 } from "lucide-react";
 
+interface Domain {
+  id: string;
+  domain: string;
+  verified: boolean;
+  isDefault: boolean;
+}
+
 interface Deployment {
   id: string;
   name: string;
@@ -41,7 +48,8 @@ interface Deployment {
   port: number;
   exposedPort?: number;
   subdomain?: string;
-  baseUrl?: string;
+  domainId?: string;
+  domain?: Domain;
   autoRebuild: boolean;
   webhookSecret?: string;
   lastDeployedAt?: string;
@@ -66,6 +74,7 @@ interface DeploymentsPanelProps {
 
 export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [selectedDeployment, setSelectedDeployment] = useState<string | null>(
@@ -82,10 +91,12 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
   const [workingDir, setWorkingDir] = useState("/workspace");
   const [port, setPort] = useState("3000");
   const [subdomain, setSubdomain] = useState("");
+  const [selectedDomainId, setSelectedDomainId] = useState("");
   const [autoRebuild, setAutoRebuild] = useState(false);
 
   useEffect(() => {
     fetchDeployments();
+    fetchDomains();
     const interval = setInterval(fetchDeployments, 5000);
     return () => clearInterval(interval);
   }, [workspaceId]);
@@ -104,6 +115,25 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
     }
   };
 
+  const fetchDomains = async () => {
+    try {
+      const res = await fetch("/api/domains");
+      if (res.ok) {
+        const data = await res.json();
+        const verifiedDomains = (data.domains || []).filter((d: Domain) => d.verified);
+        setDomains(verifiedDomains);
+        
+        // Set default domain as selected if available
+        const defaultDomain = verifiedDomains.find((d: Domain) => d.isDefault);
+        if (defaultDomain) {
+          setSelectedDomainId(defaultDomain.id);
+        }
+      }
+    } catch (error) {
+      console.error("Error fetching domains:", error);
+    }
+  };
+
   const createDeployment = async () => {
     try {
       const res = await fetch(`/api/workspaces/${workspaceId}/deployments`, {
@@ -117,6 +147,7 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
           workingDir,
           port: parseInt(port),
           subdomain: subdomain || undefined,
+          domainId: selectedDomainId || undefined,
           autoRebuild,
         }),
       });
@@ -226,6 +257,10 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
     setPort("3000");
     setSubdomain("");
     setAutoRebuild(false);
+    
+    // Reset to default domain if available
+    const defaultDomain = domains.find((d) => d.isDefault);
+    setSelectedDomainId(defaultDomain?.id || "");
   };
 
   const getStatusBadge = (status: Deployment["status"]) => {
@@ -265,8 +300,9 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
   };
 
   const getDeploymentUrl = (deployment: Deployment) => {
-    if (deployment.baseUrl && deployment.subdomain) {
-      return `https://${deployment.subdomain}.${deployment.baseUrl}`;
+    if (deployment.domain && deployment.subdomain) {
+      const protocol = deployment.domain.verified ? "https" : "http";
+      return `${protocol}://${deployment.subdomain}.${deployment.domain.domain}`;
     } else if (deployment.exposedPort) {
       return `http://localhost:${deployment.exposedPort}`;
     }
@@ -383,24 +419,54 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
                     />
                   </div>
                 </div>
-                <div>
-                  <label className="text-sm font-medium mb-1 block">
-                    Subdomain (optional)
-                  </label>
-                  <Input
-                    value={subdomain}
-                    onChange={(e) => setSubdomain(e.target.value)}
-                    placeholder="my-app"
-                    className="bg-zinc-900 border-zinc-800"
-                  />
-                  <p className="text-xs text-zinc-500 mt-1">
-                    {process.env.NEXT_PUBLIC_TRAEFIK_BASE_URL
-                      ? `Will be: ${subdomain || "my-app"}.${
-                          process.env.NEXT_PUBLIC_TRAEFIK_BASE_URL
-                        }`
-                      : "No base URL configured - will use port mapping"}
-                  </p>
-                </div>
+                {/* Domain Selection */}
+                {domains.length > 0 && (
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">
+                      Domain
+                    </label>
+                    <select
+                      value={selectedDomainId}
+                      onChange={(e) => setSelectedDomainId(e.target.value)}
+                      className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-md text-zinc-100 text-sm"
+                    >
+                      <option value="">None (use port mapping)</option>
+                      {domains.map((domain) => (
+                        <option key={domain.id} value={domain.id}>
+                          {domain.domain}
+                          {domain.isDefault ? " (default)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      {selectedDomainId
+                        ? "A subdomain will be auto-generated, or specify one below"
+                        : "Direct port mapping will be used"}
+                    </p>
+                  </div>
+                )}
+                
+                {/* Subdomain - only show if domain is selected */}
+                {selectedDomainId && (
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">
+                      Subdomain (optional)
+                    </label>
+                    <Input
+                      value={subdomain}
+                      onChange={(e) => setSubdomain(e.target.value)}
+                      placeholder="Auto-generated if empty"
+                      className="bg-zinc-900 border-zinc-800"
+                    />
+                    <p className="text-xs text-zinc-500 mt-1">
+                      {subdomain
+                        ? `Will be: ${subdomain}.${
+                            domains.find((d) => d.id === selectedDomainId)?.domain
+                          }`
+                        : "Leave empty to auto-generate a random subdomain"}
+                    </p>
+                  </div>
+                )}
                 <div className="flex items-center gap-2">
                   <input
                     type="checkbox"
