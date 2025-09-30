@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { containerAPI } from "@/lib/container-api";
 import { createAgentTools } from "@/lib/agent-tools";
 import { NextRequest } from "next/server";
+import { getSystemPrompt } from "@/lib/system";
 
 const openrouter = createOpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY!,
@@ -80,47 +81,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    const systemPrompt = getSystemPrompt(workspace);
     const result = streamText({
       model: openrouterClient(selectedModel),
       messages: transformedMessages,
-      system: `You are a helpful AI coding assistant integrated into Kalpana, a cloud development environment.
-
-You have access to the user's workspace through several tools:
-- Read and write files
-- Run shell commands
-- Search code
-- Git operations (commit, push)
-- Web research and documentation lookup
-- Code editing with diffs
-- Console log and lint error analysis
-
-Key capabilities:
-1. Help write, debug, and refactor code
-2. Execute commands and explain results
-3. Search and navigate the codebase
-4. Perform git operations
-5. Answer questions about the code
-6. Research documentation and best practices
-7. Analyze errors and suggest fixes
-
-**IMPORTANT - Communication Style:**
-- ALWAYS explain what you're about to do BEFORE calling tools
-- Example: "Let me check the file structure first" → then call listFiles
-- Example: "I'll search for the login function" → then call searchCode
-- After tool execution, ALWAYS explain the results
-- Example: After readFile → "I can see the file contains..."
-- Break down complex tasks and explain each step
-- Keep your explanations concise but clear
-
-Guidelines:
-- Be concise but thorough
-- Always verify before making changes
-- Explain your reasoning and plan
-- Ask for confirmation for destructive operations
-- Use appropriate tools for the task
-- Provide summaries and next steps
-
-The workspace is running at ${workspace.name}.`,
+      system: systemPrompt,
       tools,
       stopWhen: stepCountIs(10), // Enable multi-step calls - continue after tool execution
       onChunk: (event: any) => {

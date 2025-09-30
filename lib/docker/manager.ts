@@ -1,6 +1,8 @@
 import Docker from "dockerode";
 import { PortManager } from "./port-manager";
 import { prisma } from "@/lib/db";
+import path from "path";
+import fs from "fs";
 
 export interface WorkspaceContainer {
   containerId: string;
@@ -12,6 +14,7 @@ export interface WorkspaceContainer {
 export class DockerManager {
   private docker: Docker;
   private portManager: PortManager;
+  private static buildInProgress: Promise<void> | null = null;
 
   constructor() {
     // Connect to Docker honoring DOCKER_HOST when present
@@ -65,6 +68,93 @@ export class DockerManager {
     return new Docker({ socketPath: "/var/run/docker.sock" });
   }
 
+  private async ensureImage(imageName: string): Promise<void> {
+    const images = await this.docker.listImages({
+      filters: { reference: [imageName] } as any,
+    });
+
+    if (images && images.length > 0) return;
+
+    // If another call is already building the image, wait for it
+    if (DockerManager.buildInProgress) {
+      await DockerManager.buildInProgress;
+      return;
+    }
+
+    const buildPromise = (async () => {
+      // Determine docker build context: prefer repoRoot/container, then repoRoot/kalpana/container, or env override
+      const cwd = process.cwd();
+      const envDir = process.env.KALPANA_CONTAINER_DIR;
+      const candidates = [
+        envDir ? path.resolve(cwd, envDir) : "",
+        path.resolve(cwd, "container"),
+        path.resolve(cwd, "kalpana", "container"),
+      ].filter(Boolean) as string[];
+
+      const dockerfileContextPath = candidates.find((p) =>
+        fs.existsSync(path.join(p, "Dockerfile"))
+      );
+
+      if (!dockerfileContextPath) {
+        const suggested = "container";
+        throw new Error(
+          `Base image not found and automatic build failed to locate Dockerfile. Please build it manually:\n  docker build -t ${imageName} ${suggested}`
+        );
+      }
+
+      const tar = await import("tar-fs");
+      const fsTar = tar.pack(dockerfileContextPath);
+
+      await new Promise<void>((resolve, reject) => {
+        this.docker.buildImage(
+          fsTar as unknown as NodeJS.ReadableStream,
+          { t: imageName },
+          (err, stream) => {
+            if (err || !stream) return reject(err);
+            this.docker.modem.followProgress(
+              stream,
+              (buildErr: any) => (buildErr ? reject(buildErr) : resolve()),
+              () => {}
+            );
+          }
+        );
+      });
+    })();
+
+    DockerManager.buildInProgress = buildPromise.finally(() => {
+      DockerManager.buildInProgress = null;
+    });
+
+    await DockerManager.buildInProgress;
+  }
+
+  /**
+   * Remove existing container with the same name if it exists
+   */
+  private async removeExistingContainer(containerName: string): Promise<void> {
+    try {
+      const container = this.docker.getContainer(containerName);
+      const info = await container.inspect();
+
+      // Stop if running
+      if (info.State.Running) {
+        await container.stop();
+      }
+
+      // Remove the container
+      await container.remove({ force: true });
+      console.log(`Removed existing container: ${containerName}`);
+    } catch (error: any) {
+      // Container doesn't exist, which is fine
+      if (error.statusCode !== 404) {
+        console.error(
+          `Error removing existing container ${containerName}:`,
+          error
+        );
+      }
+    }
+  }
+
   /**
    * Create and start a workspace container
    */
@@ -111,44 +201,9 @@ export class DockerManager {
     });
 
     try {
-      // Ensure base image exists; if not, attempt to build it
+      // Ensure base image exists; build once if missing
       const imageName = "kalpana/workspace:latest";
-      const images = await this.docker.listImages({
-        filters: { reference: [imageName] } as any,
-      });
-      if (!images || images.length === 0) {
-        // Build the image from container/Dockerfile
-        // Support both running from repo root and from kalpana/ subdir
-        const cwd = process.cwd().replace(/\\/g, "/");
-        const isInKalpana = /\/(kalpana)$/i.test(cwd);
-        const dockerfileContextPath = isInKalpana
-          ? `${cwd}/container`
-          : `${cwd}/kalpana/container`;
-        try {
-          const tar = await import("tar-fs");
-          const fsTar = tar.pack(dockerfileContextPath);
-          await new Promise<void>((resolve, reject) => {
-            this.docker.buildImage(
-              fsTar as unknown as NodeJS.ReadableStream,
-              { t: imageName },
-              (err, stream) => {
-                if (err || !stream) return reject(err);
-                this.docker.modem.followProgress(
-                  stream,
-                  (buildErr: any) => (buildErr ? reject(buildErr) : resolve()),
-                  () => {}
-                );
-              }
-            );
-          });
-        } catch (buildErr) {
-          // Re-throw with clearer message
-          const suggestedPath = isInKalpana ? "container" : "kalpana/container";
-          throw new Error(
-            `Base image not found and automatic build failed. Please build it manually:\n  docker build -t ${imageName} ${suggestedPath}\nReason: ${buildErr}`
-          );
-        }
-      }
+      await this.ensureImage(imageName);
 
       // Create or get persistent volume for workspace
       const volumeName = `kalpana-workspace-${workspaceId}`;
@@ -166,10 +221,14 @@ export class DockerManager {
         console.log(`Created persistent volume: ${volumeName}`);
       }
 
+      // Remove any existing container with the same name
+      const containerName = `workspace-${workspaceId}`;
+      await this.removeExistingContainer(containerName);
+
       // Create container with persistent volume
       const container = await this.docker.createContainer({
         Image: imageName,
-        name: `workspace-${workspaceId}`,
+        name: containerName,
         Env: [
           `WORKSPACE_ID=${workspaceId}`,
           `GITHUB_REPO=${config.githubRepo || ""}`,

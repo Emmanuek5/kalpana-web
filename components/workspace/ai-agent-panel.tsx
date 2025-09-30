@@ -19,6 +19,7 @@ import {
   X,
   Paperclip,
   Image as ImageIcon,
+  BrushCleaning,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -353,7 +354,7 @@ export function AIAgentPanel({
                 className="h-7 px-2 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
                 title="Clear chat history"
               >
-                <X className="h-3.5 w-3.5" />
+                <BrushCleaning className="h-3.5 w-3.5" />
               </Button>
             )}
           </div>

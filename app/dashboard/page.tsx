@@ -153,6 +153,112 @@ export default function DashboardPage() {
     }
   };
 
+  const refreshWorkspace = async (id: string) => {
+    try {
+      const res = await fetch(`/api/workspaces/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setWorkspaces((prev) => prev.map((w) => (w.id === id ? data : w)));
+      }
+    } catch (_e) {}
+  };
+
+  const handleStartStop = async (workspace: Workspace) => {
+    const id = workspace.id;
+
+    if (workspace.status === "RUNNING") {
+      // Optimistic STOPPING state
+      setWorkspaces((prev) =>
+        prev.map((w) => (w.id === id ? { ...w, status: "STOPPING" } : w))
+      );
+
+      try {
+        const res = await fetch(`/api/workspaces/${id}/stop`, {
+          method: "POST",
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const updated = data?.workspace;
+          if (updated) {
+            setWorkspaces((prev) =>
+              prev.map((w) => (w.id === id ? updated : w))
+            );
+          } else {
+            await refreshWorkspace(id);
+          }
+        } else {
+          // Revert on failure
+          await refreshWorkspace(id);
+          alert("Failed to stop workspace");
+        }
+      } catch (e) {
+        await refreshWorkspace(id);
+        alert("Failed to stop workspace");
+      }
+      return;
+    }
+
+    // Start workspace
+    setWorkspaces((prev) =>
+      prev.map((w) => (w.id === id ? { ...w, status: "STARTING" } : w))
+    );
+
+    try {
+      const res = await fetch(`/api/workspaces/${id}/start`, {
+        method: "POST",
+      });
+
+      // The start endpoint streams SSE via text/event-stream
+      if (res.ok && res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let done = false;
+
+        while (!done) {
+          const { value, done: streamDone } = await reader.read();
+          done = streamDone;
+          if (value) {
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n\n");
+            buffer = lines.pop() || ""; // keep partial
+            for (const chunk of lines) {
+              const line = chunk.split("\n").find((l) => l.startsWith("data:"));
+              if (!line) continue;
+              const json = line.replace(/^data:\s*/, "");
+              try {
+                const evt = JSON.parse(json);
+                if (evt?.type === "complete") {
+                  setWorkspaces((prev) =>
+                    prev.map((w) =>
+                      w.id === id ? { ...w, status: "RUNNING" } : w
+                    )
+                  );
+                } else if (evt?.type === "error") {
+                  setWorkspaces((prev) =>
+                    prev.map((w) =>
+                      w.id === id ? { ...w, status: "ERROR" } : w
+                    )
+                  );
+                }
+              } catch (_e) {}
+            }
+          }
+        }
+        // Final refresh to sync ports/status
+        await refreshWorkspace(id);
+      } else {
+        await refreshWorkspace(id);
+        if (!res.ok) alert("Failed to start workspace");
+      }
+    } catch (e) {
+      setWorkspaces((prev) =>
+        prev.map((w) => (w.id === id ? { ...w, status: "ERROR" } : w))
+      );
+      alert("Failed to start workspace");
+    }
+  };
+
   if (!session) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
@@ -330,11 +436,12 @@ export default function DashboardPage() {
                           size="sm"
                           className={
                             workspace.status === "RUNNING"
-                              ? "bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700 border border-zinc-700/50 hover:border-zinc-600 flex-1 h-10 font-medium transition-all"
+                              ? "bg-red-500/20 text-red-300 hover:bg-red-500/30 border border-red-500/30 flex-1 h-10 font-medium transition-all"
                               : "bg-gradient-to-r from-emerald-600 to-emerald-500 text-white hover:from-emerald-500 hover:to-emerald-400 flex-1 h-10 shadow-lg shadow-emerald-600/30 hover:shadow-emerald-600/50 font-medium transition-all hover:scale-105"
                           }
                           onClick={(e) => {
                             e.stopPropagation();
+                            handleStartStop(workspace);
                           }}
                         >
                           {workspace.status === "RUNNING" ? (
