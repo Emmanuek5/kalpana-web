@@ -28,7 +28,10 @@ import {
   XCircle,
   AlertCircle,
   Copy,
+  FileText,
 } from "lucide-react";
+import { DeploymentTerminal } from "./deployment-terminal";
+import { DeploymentLogs } from "./deployment-logs";
 
 interface Domain {
   id: string;
@@ -82,6 +85,8 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
   );
   const [deployLogs, setDeployLogs] = useState<string[]>([]);
   const [isDeploying, setIsDeploying] = useState(false);
+  const [terminalDeployment, setTerminalDeployment] = useState<Deployment | null>(null);
+  const [logsDeployment, setLogsDeployment] = useState<Deployment | null>(null);
 
   // Form state
   const [name, setName] = useState("");
@@ -541,6 +546,7 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
                             window.open(getDeploymentUrl(deployment)!, "_blank")
                           }
                           className="h-8 w-8 p-0"
+                          title="Open in new tab"
                         >
                           <ExternalLink className="h-4 w-4" />
                         </Button>
@@ -548,8 +554,27 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
                       <Button
                         size="sm"
                         variant="ghost"
+                        onClick={() => setLogsDeployment(deployment)}
+                        className="h-8 w-8 p-0"
+                        title="View logs"
+                      >
+                        <FileText className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setTerminalDeployment(deployment)}
+                        className="h-8 w-8 p-0"
+                        title="Open terminal"
+                      >
+                        <Terminal className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
                         onClick={() => stopDeployment(deployment.id)}
                         className="h-8 w-8 p-0"
+                        title="Stop deployment"
                       >
                         <Square className="h-4 w-4" />
                       </Button>
@@ -641,7 +666,7 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
         )}
       </div>
 
-      {/* Deploy Logs Dialog */}
+      {/* Deploy Logs Dialog (for deployment progress) */}
       {selectedDeployment && (
         <Dialog
           open={!!selectedDeployment}
@@ -649,7 +674,7 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
         >
           <DialogContent className="bg-zinc-950 border-zinc-800 text-zinc-100 max-w-3xl">
             <DialogHeader>
-              <DialogTitle>Deployment Logs</DialogTitle>
+              <DialogTitle>Deployment Progress</DialogTitle>
             </DialogHeader>
             <div className="bg-black border border-zinc-800 rounded-lg p-4 h-96 overflow-auto font-mono text-xs">
               {deployLogs.map((log, i) => (
@@ -666,6 +691,26 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
             </div>
           </DialogContent>
         </Dialog>
+      )}
+
+      {/* Terminal Dialog */}
+      {terminalDeployment && (
+        <DeploymentTerminal
+          deploymentId={terminalDeployment.id}
+          deploymentName={terminalDeployment.name}
+          open={!!terminalDeployment}
+          onOpenChange={(open) => !open && setTerminalDeployment(null)}
+        />
+      )}
+
+      {/* Logs Viewer Dialog */}
+      {logsDeployment && (
+        <DeploymentLogs
+          deploymentId={logsDeployment.id}
+          deploymentName={logsDeployment.name}
+          open={!!logsDeployment}
+          onOpenChange={(open) => !open && setLogsDeployment(null)}
+        />
       )}
     </div>
   );
