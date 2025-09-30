@@ -14,6 +14,7 @@ import {
   Globe,
   ChevronDown,
   ChevronUp,
+  Bot,
 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "./ui/button";
@@ -37,6 +38,12 @@ export function Sidebar() {
       href: "/dashboard",
       icon: LayoutDashboard,
       active: pathname === "/dashboard",
+    },
+    {
+      name: "Agents",
+      href: "/dashboard/agents",
+      icon: Bot,
+      active: pathname.startsWith("/dashboard/agents"),
     },
     {
       name: "Presets",
