@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
-import { streamText } from "ai";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { agentRunner } from "@/lib/agents/agent-runner";
 
-// POST send message to agent with context
+// POST send message to agent container (uses the actual agent with tools)
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -37,89 +36,31 @@ export async function POST(
       );
     }
 
-    // Get conversation history
-    const conversationHistory = agent.conversationHistory
-      ? JSON.parse(agent.conversationHistory)
-      : [];
-
-    // Add user message to history
-    const userMessage = {
-      role: "user",
-      content: message,
-      timestamp: new Date().toISOString(),
-    };
-
-    conversationHistory.push(userMessage);
-
-    // Get user's API key or use default
+    // Get user's API key
     const user = await prisma.user.findUnique({
       where: { id: session.user.id },
-      select: { openrouterApiKey: true, defaultModel: true },
+      select: { openrouterApiKey: true },
     });
 
     const apiKey = user?.openrouterApiKey || process.env.OPENROUTER_API_KEY!;
-    const openrouter = createOpenRouter({ apiKey });
-    const model = user?.defaultModel || "anthropic/claude-3.5-sonnet";
 
-    // Build context-aware system prompt
-    const systemPrompt = `You are an autonomous coding agent working on the GitHub repository: ${agent.githubRepo}
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "OpenRouter API key not configured" },
+        { status: 400 }
+      );
+    }
 
-Original Task: ${agent.task}
+    // Use the agent runner to send message to the container
+    // This will use the actual agent with all its tools
+    await agentRunner.resumeAgent(id, message, apiKey);
 
-${
-  agent.filesEdited
-    ? `Files you've edited so far:\n${JSON.parse(agent.filesEdited)
-        .map((f: any) => `- ${f.path}`)
-        .join("\n")}`
-    : "No files edited yet."
-}
-
-The user is continuing the conversation with you. You have full context of your previous work and can:
-- Discuss what you've done
-- Make additional changes
-- Answer questions about the codebase
-- Continue or modify your previous work
-
-Maintain context from the conversation history and provide helpful, contextual responses.`;
-
-    // Prepare messages for AI (exclude timestamps for the AI)
-    const messages = conversationHistory.map((msg: any) => ({
-      role: msg.role,
-      content: msg.content,
-    }));
-
-    // Stream AI response
-    const result = streamText({
-      model: openrouter(model),
-      messages,
-      system: systemPrompt,
-      temperature: 0.7,
-      async onFinish({ text }) {
-        // Add assistant response to history
-        const assistantMessage = {
-          role: "assistant",
-          content: text,
-          timestamp: new Date().toISOString(),
-        };
-
-        conversationHistory.push(assistantMessage);
-
-        // Update agent with new conversation history
-        await prisma.agent.update({
-          where: { id },
-          data: {
-            conversationHistory: JSON.stringify(conversationHistory),
-            lastMessageAt: new Date(),
-          },
-        });
-      },
-    });
-
-    return result.toTextStreamResponse();
-  } catch (error) {
+    // Return success - the SSE stream will handle all updates
+    return NextResponse.json({ success: true, streaming: true });
+  } catch (error: any) {
     console.error("Error in agent chat:", error);
     return NextResponse.json(
-      { error: "Failed to send message" },
+      { error: error.message || "Failed to send message" },
       { status: 500 }
     );
   }

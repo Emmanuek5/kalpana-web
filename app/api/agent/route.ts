@@ -81,7 +81,21 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const systemPrompt = getSystemPrompt(workspace);
+    // Fetch codebase index if available
+    let codebaseIndex = null;
+    try {
+      const indexRes = await fetch(
+        `${req.nextUrl.origin}/api/workspaces/${workspaceId}/codebase-index`,
+        { headers: req.headers }
+      );
+      if (indexRes.ok) {
+        codebaseIndex = await indexRes.json();
+      }
+    } catch (error) {
+      console.log("Codebase index not available:", error);
+    }
+
+    const systemPrompt = getSystemPrompt(workspace, codebaseIndex);
     
     // Create custom SSE stream for better control
     const encoder = new TextEncoder();

@@ -33,7 +33,7 @@ interface EditedFile {
 }
 
 export interface AgentStreamEvent {
-  type: "text" | "tool-call" | "status" | "files" | "done" | "error";
+  type: "text" | "tool-call" | "tool-result" | "status" | "files" | "done" | "error";
   agentId: string;
   data?: any;
   timestamp: string;
@@ -614,6 +614,33 @@ class AgentRunner {
       } messages`
     );
 
+    // Set up timeout to detect stuck agents (10 minutes of no activity)
+    let lastActivityTime = Date.now();
+    const ACTIVITY_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+    
+    const activityCheckInterval = setInterval(async () => {
+      const timeSinceLastActivity = Date.now() - lastActivityTime;
+      if (timeSinceLastActivity > ACTIVITY_TIMEOUT) {
+        console.error(`⏱️ Agent ${agentId} timed out after ${ACTIVITY_TIMEOUT / 1000}s of inactivity`);
+        clearInterval(activityCheckInterval);
+        
+        // Update agent status to ERROR
+        await prisma.agent.update({
+          where: { id: agentId },
+          data: {
+            status: "ERROR",
+            errorMessage: "Agent execution timed out due to inactivity",
+            lastMessageAt: new Date(),
+          },
+        });
+        
+        // Emit error event
+        this.emitAgentEvent(agentId, "error", {
+          error: "Agent execution timed out due to inactivity",
+        });
+      }
+    }, 30000); // Check every 30 seconds
+
     try {
       const response = await fetch(endpoint, {
         method: "POST",
@@ -653,11 +680,15 @@ class AgentRunner {
             try {
               const data = JSON.parse(line.slice(6));
 
+              // Reset activity timer on any data received
+              lastActivityTime = Date.now();
+
               // Handle errors FIRST and outside of the generic catch
               if (data.type === "error") {
                 console.error(
                   `❌ Agent container reported error: ${data.error}`
                 );
+                clearInterval(activityCheckInterval);
                 throw new Error(data.error || "Agent execution failed");
               }
 
@@ -726,6 +757,17 @@ class AgentRunner {
                     lastMessageAt: new Date(),
                   },
                 });
+              } else if (data.type === "tool-result") {
+                // Log tool result
+                console.log(`📤 Tool result: ${data.toolName}`);
+                console.log(`   Result:`, data.result);
+
+                // Emit tool result event in real-time
+                this.emitAgentEvent(agentId, "tool-result", {
+                  toolCallId: data.toolCallId,
+                  toolName: data.toolName,
+                  result: data.result,
+                });
               } else if (data.type === "done") {
                 console.log(`✅ Agent task completed`);
                 console.log(
@@ -743,12 +785,14 @@ class AgentRunner {
                   `   Tool calls: ${data.state?.toolCallsCount || 0}`
                 );
 
-                // Add final assistant response to conversation history
-                conversationHistory.push({
-                  role: "assistant",
-                  content: fullResponse,
-                  timestamp: new Date().toISOString(),
-                });
+                // Add final assistant response to conversation history if we have content
+                if (fullResponse && fullResponse.trim()) {
+                  conversationHistory.push({
+                    role: "assistant",
+                    content: fullResponse,
+                    timestamp: new Date().toISOString(),
+                  });
+                }
 
                 // Emit files edited event
                 if (data.state?.filesEdited?.length > 0) {
@@ -770,12 +814,15 @@ class AgentRunner {
                   },
                 });
 
-                // Emit done event in real-time
+                // Emit done event in real-time (don't send large objects)
                 this.emitAgentEvent(agentId, "done", {
                   status: "COMPLETED",
-                  filesEdited: data.state?.filesEdited || [],
+                  filesEditedCount: data.state?.filesEdited?.length || 0,
                   toolCallsCount: toolCallsCollected.length,
                 });
+                
+                // Clear activity timeout
+                clearInterval(activityCheckInterval);
               }
             } catch (e: any) {
               // Only skip lines that are genuinely invalid JSON
@@ -795,6 +842,9 @@ class AgentRunner {
       }
     } catch (error: any) {
       console.error(`❌ Agent execution error:`, error);
+
+      // Clear activity timeout
+      clearInterval(activityCheckInterval);
 
       // Save error to database
       await prisma.agent.update({

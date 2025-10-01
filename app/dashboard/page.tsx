@@ -59,6 +59,7 @@ export default function DashboardPage() {
   const [editedName, setEditedName] = useState("");
   const [editedDescription, setEditedDescription] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleteVolume, setDeleteVolume] = useState(false);
 
   useEffect(() => {
     fetchSession();
@@ -127,6 +128,7 @@ export default function DashboardPage() {
   const handleOpenDelete = (workspace: Workspace, e: React.MouseEvent) => {
     e.stopPropagation();
     setSelectedWorkspace(workspace);
+    setDeleteVolume(false); // Reset checkbox
     setDeleteModalOpen(true);
   };
 
@@ -135,7 +137,10 @@ export default function DashboardPage() {
 
     setDeleting(true);
     try {
-      const res = await fetch(`/api/workspaces/${selectedWorkspace.id}`, {
+      const url = `/api/workspaces/${selectedWorkspace.id}${
+        deleteVolume ? "?deleteVolume=true" : ""
+      }`;
+      const res = await fetch(url, {
         method: "DELETE",
       });
 
@@ -551,24 +556,57 @@ export default function DashboardPage() {
               Delete Workspace
             </DialogTitle>
             <DialogDescription className="text-zinc-500">
-              Are you sure you want to delete "{selectedWorkspace?.name}"? This
-              action cannot be undone.
+              Are you sure you want to delete "{selectedWorkspace?.name}"?
             </DialogDescription>
           </DialogHeader>
-          <div className="py-4">
-            <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/20">
+          <div className="py-4 space-y-4">
+            <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20">
               <div className="flex items-start gap-3">
-                <AlertCircle className="h-5 w-5 text-red-400 mt-0.5 shrink-0" />
+                <AlertCircle className="h-5 w-5 text-amber-400 mt-0.5 shrink-0" />
                 <div>
-                  <p className="text-sm font-medium text-red-400 mb-1">
-                    Warning
+                  <p className="text-sm font-medium text-amber-400 mb-1">
+                    Container Removal
                   </p>
                   <p className="text-sm text-zinc-400">
-                    All data associated with this workspace will be permanently
-                    deleted, including files, configurations, and history.
+                    The Docker container will be stopped and removed. Your workspace files will be preserved in a volume.
                   </p>
                 </div>
               </div>
+            </div>
+
+            <div className="space-y-3">
+              <label className="flex items-start gap-3 p-4 rounded-lg border border-zinc-800 hover:border-zinc-700 cursor-pointer transition-colors">
+                <input
+                  type="checkbox"
+                  checked={deleteVolume}
+                  onChange={(e) => setDeleteVolume(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-zinc-700 bg-zinc-800 text-red-600 focus:ring-red-500 focus:ring-offset-0 cursor-pointer"
+                />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-zinc-300 mb-1">
+                    Also delete workspace volume (permanent)
+                  </p>
+                  <p className="text-xs text-zinc-500">
+                    This will permanently delete all files, code, and data. This action cannot be undone.
+                  </p>
+                </div>
+              </label>
+
+              {deleteVolume && (
+                <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/20">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="h-5 w-5 text-red-400 mt-0.5 shrink-0" />
+                    <div>
+                      <p className="text-sm font-medium text-red-400 mb-1">
+                        ⚠️ Permanent Data Loss
+                      </p>
+                      <p className="text-sm text-zinc-400">
+                        All workspace files will be permanently deleted. You will not be able to recover them.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>

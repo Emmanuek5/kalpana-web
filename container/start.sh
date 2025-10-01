@@ -334,12 +334,37 @@ else
 
     echo "📦 Installing Kalpana diagnostics extension..."
     if [ -f /vscode-extension/kalpana-diagnostics.vsix ]; then
+        # Remove any cached version of Kalpana extension to ensure fresh install
+        KALPANA_EXT_DIR="${HOME}/.local/share/code-server/extensions"
+        if [ -d "$KALPANA_EXT_DIR" ]; then
+            rm -rf "$KALPANA_EXT_DIR"/kalpana.kalpana-diagnostics-* 2>/dev/null || true
+            echo "🗑️  Removed cached Kalpana extension"
+        fi
+        
+        # Install fresh version
         code-server --install-extension /vscode-extension/kalpana-diagnostics.vsix --force 2>&1 && \
         echo "✅ Kalpana extension installed successfully" || \
         echo "⚠️ Extension install failed"
     fi
 
     rm -f /tmp/kalpana-extension-activated.log
+    
+    # Always remove old config to ensure fresh configuration
+    rm -f /tmp/kalpana-config.json
+
+    # Configure autocomplete with OpenRouter API key
+    if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+        echo "🤖 Configuring AI autocomplete..."
+        cat > /tmp/kalpana-config.json << EOF
+{
+  "openrouterApiKey": "${OPENROUTER_API_KEY}",
+  "autocompleteModel": "${AUTOCOMPLETE_MODEL:-google/gemma-3-27b-it:free}"
+}
+EOF
+        echo "✅ Autocomplete configured with model: ${AUTOCOMPLETE_MODEL:-google/gemma-3-27b-it:free}"
+    else
+        echo "ℹ️  No OpenRouter API key provided, autocomplete will be disabled"
+    fi
 
     if [ -z "${PASSWORD:-}" ]; then
         if command -v openssl >/dev/null 2>&1; then
@@ -351,6 +376,19 @@ else
         fi
         echo "Generated password: $PASSWORD"
     fi
+
+    # Start background indexer (re-indexes every 5 minutes)
+    (
+        while true; do
+            sleep 300  # 5 minutes
+            echo "🔄 Running periodic codebase re-index..."
+            /index-codebase.sh /workspace 2>&1 | head -5
+        done
+    ) &
+
+    # Generate initial index
+    echo "🔍 Generating initial codebase index..."
+    /index-codebase.sh /workspace 2>&1 | head -5 &
 
     if command -v code-server >/dev/null 2>&1; then
         if [ "${DEBUG:-false}" = "true" ]; then

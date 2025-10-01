@@ -168,6 +168,8 @@ export class DockerManager {
       preset?: string;
       gitUserName?: string;
       gitUserEmail?: string;
+      openrouterApiKey?: string;
+      autocompleteModel?: string;
     }
   ): Promise<WorkspaceContainer> {
     // Allocate ports
@@ -229,6 +231,43 @@ export class DockerManager {
           console.log(`Created persistent volume: ${volumeName}`);
         }
 
+        // Create or get shared Nix volume for caching packages
+        // Note: We mount /nix (not just /nix/store) because Nix needs /nix/var for its database
+        const nixVolumeName = "kalpana-nix-cache";
+        try {
+          await this.docker.getVolume(nixVolumeName).inspect();
+          console.log(`Using existing Nix cache: ${nixVolumeName}`);
+        } catch (error) {
+          // Volume doesn't exist, create it
+          await this.docker.createVolume({
+            Name: nixVolumeName,
+            Labels: {
+              "kalpana.shared": "true",
+              "kalpana.managed": "true",
+              "kalpana.type": "nix-cache",
+            },
+          });
+          console.log(`Created shared Nix cache: ${nixVolumeName}`);
+        }
+
+        // Create or get shared VSCode extensions volume for caching
+        const extensionsVolumeName = "kalpana-vscode-extensions";
+        try {
+          await this.docker.getVolume(extensionsVolumeName).inspect();
+          console.log(`Using existing VSCode extensions cache: ${extensionsVolumeName}`);
+        } catch (error) {
+          // Volume doesn't exist, create it
+          await this.docker.createVolume({
+            Name: extensionsVolumeName,
+            Labels: {
+              "kalpana.shared": "true",
+              "kalpana.managed": "true",
+              "kalpana.type": "extensions-cache",
+            },
+          });
+          console.log(`Created shared VSCode extensions cache: ${extensionsVolumeName}`);
+        }
+
         // Remove any existing container with the same name
         const containerName = `workspace-${workspaceId}`;
         await this.removeExistingContainer(containerName);
@@ -248,6 +287,8 @@ export class DockerManager {
             `GIT_USER_EMAIL=${config.gitUserEmail || ""}`,
             `CUSTOM_PRESET_SETTINGS=${presetSettings}`,
             `CUSTOM_PRESET_EXTENSIONS=${presetExtensions}`,
+            `OPENROUTER_API_KEY=${config.openrouterApiKey || ""}`,
+            `AUTOCOMPLETE_MODEL=${config.autocompleteModel || "google/gemma-3-27b-it:free"}`,
           ],
           ExposedPorts: {
             "8080/tcp": {}, // code-server
@@ -259,7 +300,9 @@ export class DockerManager {
               "3001/tcp": [{ HostPort: agentPort.toString() }],
             },
             Binds: [
-              `${volumeName}:/workspace`, // Mount persistent volume
+              `${volumeName}:/workspace`, // Mount persistent workspace volume
+              `${nixVolumeName}:/nix`, // Mount shared Nix cache (includes store + var)
+              `${extensionsVolumeName}:/root/.local/share/code-server/extensions`, // Mount shared extensions cache
             ],
             Memory: parseInt(
               process.env.DEFAULT_CONTAINER_MEMORY || "2147483648"

@@ -14,10 +14,21 @@ async function monitorWorkspaceStartup(
   const docker = dockerManager["docker"] as Docker;
   const container = docker.getContainer(containerId);
 
+  if (!container) {
+    console.error(`❌ Container not found for workspace ${workspaceId}`);
+    await prisma.workspace.update({
+      where: { id: workspaceId },
+      data: { status: "ERROR" },
+    });
+    return;
+  }
+
   let agentReady = false;
   let codeServerReady = false;
+  let nixInstalling = false;
   let checksPerformed = 0;
-  const maxChecks = 45; // 90 seconds
+  const baseMaxChecks = 45; // 90 seconds base timeout
+  let maxChecks = baseMaxChecks;
 
   // Monitor container logs for readiness signals
   const logMonitor = setInterval(async () => {
@@ -25,10 +36,39 @@ async function monitorWorkspaceStartup(
       const logs = await container.logs({
         stdout: true,
         stderr: true,
-        tail: 50,
+        tail: 100,
       });
 
+      
+
       const logText = logs.toString();
+
+      // Check if Nix is installing packages
+      if (
+        !nixInstalling &&
+        (logText.includes("copying path") ||
+          logText.includes("building") ||
+          logText.includes("downloading") ||
+          logText.includes("these") ||
+          logText.includes("will be fetched"))
+      ) {
+        nixInstalling = true;
+        maxChecks = 250; // Extend to 5 minutes when Nix is installing
+        console.log(
+          `📦 Workspace ${workspaceId}: Nix package installation detected, extending timeout to 5 minutes`
+        );
+      }
+
+      // Check if Nix installation completed
+      if (
+        nixInstalling &&
+        (logText.includes("Nix environment configured") ||
+          logText.includes("Installing Kalpana") ||
+          logText.includes("code-server"))
+      ) {
+        nixInstalling = false;
+        console.log(`✅ Workspace ${workspaceId}: Nix installation completed`);
+      }
 
       if (
         !agentReady &&
@@ -44,6 +84,16 @@ async function monitorWorkspaceStartup(
         console.log(`✅ Workspace ${workspaceId}: Code-server ready`);
       }
     } catch (error) {
+      if (error instanceof Error && error.message.includes("no such container")) {
+        clearInterval(logMonitor);
+        clearInterval(statusCheck);
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: { status: "ERROR" },
+        });
+        console.error(`❌ Container not found for workspace ${workspaceId}`);
+        return;
+      }
       console.error(`Error reading logs for workspace ${workspaceId}:`, error);
     }
   }, 2000);
@@ -54,10 +104,14 @@ async function monitorWorkspaceStartup(
       checksPerformed++;
       const info = await container.inspect();
 
-      console.log(
-        `[${workspaceId}] Check #${checksPerformed}: Running=${info.State.Running}, Agent=${agentReady}, CodeServer=${codeServerReady}`
-      );
+      const statusMsg = nixInstalling ? "NixInstalling" : "Ready";
 
+      if (checksPerformed % 10 === 0) {
+        console.log(
+          `⏱ Workspace ${workspaceId}: ${checksPerformed} checks performed, status: ${statusMsg}`
+        );
+      }
+     
       // Ready if both are ready, OR if code-server is ready and we've waited 30+ seconds
       const isReady = info.State.Running && agentReady && codeServerReady;
       const failsafeReady =
@@ -96,9 +150,19 @@ async function monitorWorkspaceStartup(
         console.error(`❌ Workspace ${workspaceId} startup timeout`);
       }
     } catch (error) {
+      if (error instanceof Error && error.message.includes("no such container")) {
+        clearInterval(logMonitor);
+        clearInterval(statusCheck);
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: { status: "ERROR" },
+        });
+        console.error(`❌ Container not found for workspace ${workspaceId}`);
+        return;
+      }
       console.error(`Error checking workspace ${workspaceId}:`, error);
     }
-  }, 2000);
+  }, 3000);
 }
 
 export async function POST(
@@ -140,6 +204,12 @@ export async function POST(
       },
     });
 
+    // Get user's OpenRouter API key for autocomplete
+    const user = await prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { openrouterApiKey: true },
+    });
+
     // Start the workspace container
     const container = await dockerManager.createWorkspace(workspace.id, {
       githubRepo: workspace.githubRepo || undefined,
@@ -149,6 +219,8 @@ export async function POST(
       preset: workspace.preset || "default",
       gitUserName: session.user.name || undefined,
       gitUserEmail: session.user.email || undefined,
+      openrouterApiKey: user?.openrouterApiKey || undefined,
+      autocompleteModel: "google/gemma-3-27b-it:free", // Can be made configurable later
     });
 
     // Start background monitoring (runs independently of this request)

@@ -43,6 +43,7 @@ export class AgentExecutor {
     name: string;
     arguments: any;
     timestamp: string;
+    isResult?: boolean;
   }) => void;
 
   constructor(apiKey: string, model: string = "anthropic/claude-3.5-sonnet") {
@@ -88,6 +89,7 @@ export class AgentExecutor {
       name: string;
       arguments: any;
       timestamp: string;
+      isResult?: boolean;
     }) => void
   ): void {
     this.toolCallCallback = callback;
@@ -171,6 +173,33 @@ export class AgentExecutor {
             // Notify callback if set
             if (this.toolCallCallback) {
               this.toolCallCallback(toolCallInfo);
+            }
+          }
+
+          // Emit tool results
+          for (let i = 0; i < toolResults.length; i++) {
+            const toolResult = toolResults[i] as any;
+            
+            // The result is directly on the toolResult object, not nested
+            const result = toolResult.result || toolResult;
+            
+            console.log(
+              `📤 [AgentExecutor] Tool result ${i + 1}/${toolResults.length}: ${
+                toolResult.toolName
+              }`,
+              `\n   Result:`,
+              JSON.stringify(result, null, 2)
+            );
+
+            // Notify callback with tool result
+            if (this.toolCallCallback) {
+              this.toolCallCallback({
+                id: toolResult.toolCallId,
+                name: toolResult.toolName,
+                arguments: result, // Send result directly, not wrapped
+                timestamp: new Date().toISOString(),
+                isResult: true, // Flag to identify this as a result
+              });
             }
           }
 
@@ -306,6 +335,20 @@ export class AgentExecutor {
 
 ## Your Mission
 Understand the codebase and make the necessary changes to complete the user's request accurately and efficiently.
+
+## Communication Style
+**IMPORTANT**: Always explain your thought process and plan BEFORE using tools. Follow this pattern:
+1. First, describe what you're about to do and why
+2. Then use the appropriate tools
+3. After tools complete, explain what you learned and your next steps
+
+Example:
+"I'll start by exploring the repository structure to understand the codebase organization."
+[uses list_directory tool]
+"I can see this is a TypeScript project with src/ and tests/ directories. Let me examine the main entry point..."
+[uses read_file tool]
+
+This helps users follow your reasoning and understand your progress.
 
 ## Available Tools
 

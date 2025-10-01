@@ -39,11 +39,13 @@ RUN bun install && \
 # Copy VS Code presets
 COPY presets /presets
 
-# Copy startup script
+# Copy startup script and indexing script
 WORKDIR /
 COPY start.sh /start.sh
+COPY index-codebase.sh /index-codebase.sh
 # Normalize line endings to LF to avoid Exec format errors on Windows hosts
-RUN sed -i 's/\r$//' /start.sh && chmod +x /start.sh
+RUN sed -i 's/\r$//' /start.sh && chmod +x /start.sh && \
+    sed -i 's/\r$//' /index-codebase.sh && chmod +x /index-codebase.sh
 
 # Expose ports
 # 8080: code-server (VSCode)

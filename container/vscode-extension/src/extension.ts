@@ -1,11 +1,13 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import { WebSocketServer, WebSocket } from "ws";
+import { KalpanaInlineCompletionProvider } from "./autocomplete-provider";
 
 // Log that module is being loaded
 console.log("📦 Kalpana extension module loaded");
 
 const DIAGNOSTICS_FILE = "/tmp/kalpana-diagnostics.json";
+const CONFIG_FILE = "/tmp/kalpana-config.json";
 const UPDATE_INTERVAL = 2000;
 const WS_PORT = 3002; // Extension WebSocket server port
 
@@ -30,7 +32,8 @@ interface VSCodeCommand {
     | "findReferences"
     | "searchSymbols"
     | "formatDocument"
-    | "getHover";
+    | "getHover"
+    | "updateAutocompleteConfig";
   payload: any;
 }
 
@@ -57,6 +60,18 @@ export function activate(context: vscode.ExtensionContext) {
 
   let updateTimer: NodeJS.Timeout | undefined;
   const terminals = new Map<string, vscode.Terminal>();
+
+  // ========== Initialize Autocomplete Provider ==========
+  const autocompleteProvider = new KalpanaInlineCompletionProvider();
+  
+  // Register inline completion provider for all languages
+  const completionDisposable = vscode.languages.registerInlineCompletionItemProvider(
+    { pattern: "**" },
+    autocompleteProvider
+  );
+  
+  context.subscriptions.push(completionDisposable);
+  console.log("✅ Autocomplete provider registered");
 
   // ========== WebSocket Server for Direct Communication ==========
   let wss: WebSocketServer;
@@ -210,6 +225,27 @@ export function activate(context: vscode.ExtensionContext) {
             id: command.id,
             success: true,
             data: hover,
+          };
+        }
+
+        case "updateAutocompleteConfig": {
+          const { apiKey, model } = command.payload;
+          autocompleteProvider.updateApiKey(apiKey, model);
+          
+          // Also write to config file for persistence
+          try {
+            fs.writeFileSync(
+              CONFIG_FILE,
+              JSON.stringify({ openrouterApiKey: apiKey, autocompleteModel: model }, null, 2)
+            );
+          } catch (error) {
+            console.error("Failed to write config:", error);
+          }
+          
+          return {
+            id: command.id,
+            success: true,
+            data: { message: "Autocomplete config updated" },
           };
         }
 

@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
+import { dockerManager } from "@/lib/docker/manager";
 import { NextRequest, NextResponse } from "next/server";
 
 // GET /api/workspaces/[id] - Get single workspace
@@ -74,7 +75,28 @@ export async function DELETE(
       );
     }
 
-    // TODO: Stop and remove container if running
+    // Check if user wants to delete volume (permanent data deletion)
+    const url = new URL(req.url);
+    const deleteVolume = url.searchParams.get("deleteVolume") === "true";
+
+    // Stop and remove container if it exists
+    if (workspace.containerId) {
+      try {
+        console.log(`🗑️  Stopping and removing container for workspace ${id}`);
+        
+        // Use destroyWorkspace to clean up container and optionally volume
+        await dockerManager.destroyWorkspace(id, deleteVolume);
+        
+        if (deleteVolume) {
+          console.log(`✅ Container and volume removed for workspace ${id}`);
+        } else {
+          console.log(`✅ Container removed for workspace ${id} (volume preserved)`);
+        }
+      } catch (error) {
+        console.error(`Error removing container for workspace ${id}:`, error);
+        // Continue with database deletion even if container removal fails
+      }
+    }
 
     await prisma.workspace.delete({
       where: { id: workspace.id },

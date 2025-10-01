@@ -435,7 +435,7 @@ export default function PresetsPage() {
       </div>
 
       <Dialog open={showDialog} onOpenChange={setShowDialog}>
-        <DialogContent className="bg-zinc-900 border-zinc-800 max-w-4xl max-h-[80vh] overflow-y-auto">
+        <DialogContent className="bg-zinc-900 border-zinc-800 !max-w-5xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-zinc-100">
               {editingPreset ? "Edit Preset" : "Create New Preset"}
@@ -620,7 +620,7 @@ export default function PresetsPage() {
       </Dialog>
       {/* Marketplace Dialog */}
       <Dialog open={showMarketplace} onOpenChange={setShowMarketplace}>
-        <DialogContent className="bg-zinc-900 border-zinc-800 max-w-[95vw] max-h-[85vh] overflow-y-auto">
+        <DialogContent className="bg-zinc-900 border-zinc-800 !max-w-[60vw] max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-zinc-100">
               Search Extensions

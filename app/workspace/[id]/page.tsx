@@ -22,6 +22,7 @@ import {
   ChevronDown,
   ChevronUp,
   ArrowLeft,
+  Code2,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -167,30 +168,52 @@ export default function WorkspacePage({
   const renderTextWithFileLinks = (text: string) => {
     const parts: React.ReactNode[] = [];
     let lastIndex = 0;
-    const regex = new RegExp(FILE_PATH_REGEX);
+    
+    // Combined regex for both file paths and @mentions
+    const combinedRegex = /@([\w\-./()]+)|(?:File|Path|file|path):\s*([^\s,;]+)/g;
     let match;
 
-    while ((match = regex.exec(text)) !== null) {
+    while ((match = combinedRegex.exec(text)) !== null) {
       // Add text before the match
       if (match.index > lastIndex) {
         parts.push(text.substring(lastIndex, match.index));
       }
 
-      // Add clickable file link
-      const filePath = match[1].trim();
-      parts.push(
-        <button
-          key={`file-${match.index}`}
-          onClick={() => handleOpenFile(filePath)}
-          className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 hover:underline transition-colors cursor-pointer bg-zinc-900/50 px-1.5 py-0.5 rounded border border-zinc-800 hover:border-emerald-800 font-mono text-xs"
-          title={`Open ${filePath}`}
-        >
-          <FileCode className="h-3 w-3" />
-          {filePath}
-        </button>
-      );
+      // Check if it's an @mention (group 1) or file path (group 2)
+      if (match[1]) {
+        // @mention - style as badge
+        const mentionText = match[1];
+        const isFunction = mentionText.includes("()");
+        parts.push(
+          <span
+            key={`mention-${match.index}`}
+            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 mx-0.5 bg-emerald-500/15 border border-emerald-500/30 rounded text-[11px] text-emerald-400 font-mono"
+          >
+            {isFunction ? (
+              <Code2 className="h-2.5 w-2.5" />
+            ) : (
+              <FileCode className="h-2.5 w-2.5" />
+            )}
+            {mentionText}
+          </span>
+        );
+      } else if (match[2]) {
+        // File path - clickable link
+        const filePath = match[2].trim();
+        parts.push(
+          <button
+            key={`file-${match.index}`}
+            onClick={() => handleOpenFile(filePath)}
+            className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 hover:underline transition-colors cursor-pointer bg-zinc-900/50 px-1.5 py-0.5 rounded border border-zinc-800 hover:border-emerald-800 font-mono text-xs"
+            title={`Open ${filePath}`}
+          >
+            <FileCode className="h-3 w-3" />
+            {filePath}
+          </button>
+        );
+      }
 
-      lastIndex = regex.lastIndex;
+      lastIndex = combinedRegex.lastIndex;
     }
 
     // Add remaining text

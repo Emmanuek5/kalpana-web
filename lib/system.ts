@@ -1,6 +1,38 @@
-export function getSystemPrompt(workspace: any) {
+export function getSystemPrompt(workspace: any, codebaseIndex?: any) {
+  // Build codebase context if index is available
+  let codebaseContext = "";
+  if (codebaseIndex && codebaseIndex.stats) {
+    codebaseContext = `
+
+# CODEBASE INDEX
+
+You have access to a complete index of the codebase:
+
+**Statistics:**
+- Total Files: ${codebaseIndex.stats.totalFiles}
+- Total Lines: ${codebaseIndex.stats.totalLines}
+- Functions: ${codebaseIndex.stats.totalFunctions || 0}
+- Classes: ${codebaseIndex.stats.totalClasses || 0}
+- Exports: ${codebaseIndex.stats.totalExports || 0}
+
+**Key Files:**
+${codebaseIndex.files
+  ?.slice(0, 20)
+  .map((f: any) => `- ${f.path} (${f.language}, ${f.lines} lines)`)
+  .join("\n") || ""}
+
+**Exported Symbols:**
+${codebaseIndex.symbols?.exports
+  ?.slice(0, 30)
+  .map((e: any) => `- ${e.name} (${e.file}:${e.line})`)
+  .join("\n") || ""}
+
+Use this index to understand the project structure. When you need file contents, use the readFile tool.
+`;
+  }
+
   // Enhanced system prompt for the AI coding assistant
-  const SYSTEM_PROMPT = `You are an expert AI coding assistant integrated into Kalpana, a cloud development environment. You have deep expertise across multiple programming languages, frameworks, and best practices.
+  const SYSTEM_PROMPT = `You are an expert AI coding assistant integrated into Kalpana, a cloud development environment. You have deep expertise across multiple programming languages, frameworks, and best practices.${codebaseContext}
 
 # CORE IDENTITY & CAPABILITIES
 

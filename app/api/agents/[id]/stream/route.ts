@@ -47,22 +47,7 @@ export async function GET(
 
         // Send existing data from database
         try {
-          if (agent.toolCalls) {
-            const toolCalls = JSON.parse(agent.toolCalls);
-            if (Array.isArray(toolCalls)) {
-              for (const toolCall of toolCalls) {
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
-                      type: "tool-call",
-                      toolCall,
-                    })}\n\n`
-                  )
-                );
-              }
-            }
-          }
-
+          // Send conversation history FIRST (so messages appear before tool calls)
           if (agent.conversationHistory) {
             const conversation = JSON.parse(agent.conversationHistory);
             if (Array.isArray(conversation)) {
@@ -72,6 +57,23 @@ export async function GET(
                     `data: ${JSON.stringify({
                       type: "message",
                       message,
+                    })}\n\n`
+                  )
+                );
+              }
+            }
+          }
+
+          // Send tool calls AFTER messages (so they appear in correct order)
+          if (agent.toolCalls) {
+            const toolCalls = JSON.parse(agent.toolCalls);
+            if (Array.isArray(toolCalls)) {
+              for (const toolCall of toolCalls) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "tool-call",
+                      toolCall,
                     })}\n\n`
                   )
                 );
@@ -127,6 +129,19 @@ export async function GET(
                   );
                   break;
 
+                case "tool-result":
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "tool-result",
+                        toolCallId: event.data.toolCallId,
+                        toolName: event.data.toolName,
+                        result: event.data.result,
+                      })}\n\n`
+                    )
+                  );
+                  break;
+
                 case "status":
                   controller.enqueue(
                     encoder.encode(
@@ -156,16 +171,14 @@ export async function GET(
                       `data: ${JSON.stringify({
                         type: "done",
                         status: event.data.status,
-                        filesEdited: event.data.filesEdited,
+                        filesEditedCount: event.data.filesEditedCount,
                         toolCallsCount: event.data.toolCallsCount,
                       })}\n\n`
                     )
                   );
-                  // Close the stream when done
-                  setTimeout(() => {
-                    unsubscribe();
-                    controller.close();
-                  }, 100);
+                  // Keep stream open for potential resume - don't close!
+                  // The client will stay connected and receive new events if agent is resumed
+                  console.log(`📡 [Stream API] Agent ${id} completed, stream remains open for resume`);
                   break;
 
                 case "error":
@@ -177,11 +190,8 @@ export async function GET(
                       })}\n\n`
                     )
                   );
-                  // Close the stream on error
-                  setTimeout(() => {
-                    unsubscribe();
-                    controller.close();
-                  }, 100);
+                  // Keep stream open even on error - user might want to resume/retry
+                  console.log(`📡 [Stream API] Agent ${id} errored, stream remains open for retry`);
                   break;
               }
             } catch (error) {

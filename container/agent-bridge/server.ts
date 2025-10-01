@@ -855,17 +855,32 @@ const httpServer = createServer(async (req, res) => {
         Connection: "keep-alive",
       });
 
-      // Set up tool call callback to stream tool calls
-      agentExecutor.setToolCallCallback((toolCall) => {
-        console.log(`🔧 [Server] Tool call: ${toolCall.name}`);
-        res.write(
-          `data: ${JSON.stringify({
-            type: "tool-call",
-            toolName: toolCall.name,
-            toolCallId: toolCall.id,
-            args: toolCall.arguments,
-          })}\n\n`
-        );
+      // Set up tool call callback to stream tool calls and results
+      agentExecutor.setToolCallCallback((toolCall: any) => {
+        // Check if this is a tool result (has isResult flag)
+        if (toolCall.isResult) {
+          console.log(`📤 [Server] Tool result: ${toolCall.name}`);
+          console.log(`   Result:`, JSON.stringify(toolCall.arguments, null, 2));
+          res.write(
+            `data: ${JSON.stringify({
+              type: "tool-result",
+              toolName: toolCall.name,
+              toolCallId: toolCall.id,
+              result: toolCall.arguments,
+            })}\n\n`
+          );
+        } else {
+          console.log(`🔧 [Server] Tool call: ${toolCall.name}`);
+          console.log(`   Arguments:`, JSON.stringify(toolCall.arguments, null, 2));
+          res.write(
+            `data: ${JSON.stringify({
+              type: "tool-call",
+              toolName: toolCall.name,
+              toolCallId: toolCall.id,
+              args: toolCall.arguments,
+            })}\n\n`
+          );
+        }
       });
 
       console.log(`🎯 [Server] Starting to stream agent execution response...`);
