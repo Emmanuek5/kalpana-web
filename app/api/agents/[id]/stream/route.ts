@@ -209,7 +209,7 @@ export async function GET(
             controller.error(error);
             clearInterval(interval);
           }
-        }, 1000); // Check every second
+        }, 300); // Check every 300ms for smoother streaming
 
         // Clean up on client disconnect
         req.signal.addEventListener("abort", () => {

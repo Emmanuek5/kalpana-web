@@ -30,6 +30,9 @@ interface FileEdit {
   path: string;
   operation: "created" | "modified" | "deleted";
   timestamp: string;
+  originalContent?: string;
+  newContent?: string;
+  diff?: string;
 }
 
 let filesEdited: FileEdit[] = [];
@@ -46,6 +49,35 @@ export function getEditedFiles(): FileEdit[] {
  */
 export function clearEditedFiles(): void {
   filesEdited = [];
+}
+
+/**
+ * Generate a simple diff between two strings
+ */
+function generateDiff(original: string, updated: string): string {
+  const originalLines = original.split("\n");
+  const updatedLines = updated.split("\n");
+
+  const diff: string[] = [];
+  const maxLines = Math.max(originalLines.length, updatedLines.length);
+
+  for (let i = 0; i < maxLines; i++) {
+    const origLine = originalLines[i];
+    const updLine = updatedLines[i];
+
+    if (origLine === undefined) {
+      diff.push(`+ ${updLine}`);
+    } else if (updLine === undefined) {
+      diff.push(`- ${origLine}`);
+    } else if (origLine !== updLine) {
+      diff.push(`- ${origLine}`);
+      diff.push(`+ ${updLine}`);
+    } else {
+      diff.push(`  ${origLine}`);
+    }
+  }
+
+  return diff.join("\n");
 }
 
 /**
@@ -82,6 +114,16 @@ export const write_file = tool({
 
     const existed = existsSync(fullPath);
 
+    // Read original content if file exists
+    let originalContent = "";
+    if (existed) {
+      try {
+        originalContent = await readFile(fullPath, "utf-8");
+      } catch (e) {
+        originalContent = "";
+      }
+    }
+
     // Create directory if needed
     const dir = path.dirname(fullPath);
     if (!existsSync(dir)) {
@@ -90,10 +132,18 @@ export const write_file = tool({
 
     await writeFile(fullPath, content, "utf-8");
 
+    // Generate diff
+    const diff = existed
+      ? generateDiff(originalContent, content)
+      : `+ ${content}`;
+
     filesEdited.push({
       path: filePath,
       operation: existed ? "modified" : "created",
       timestamp: new Date().toISOString(),
+      originalContent: existed ? originalContent : "",
+      newContent: content,
+      diff,
     });
 
     return { success: true, operation: existed ? "modified" : "created" };

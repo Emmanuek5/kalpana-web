@@ -3,6 +3,7 @@ import { z } from "zod";
 import { containerAPI } from "./container-api";
 import { runLocalAgent } from "./agents/web-research-agent";
 import { executeCodeEdit } from "./agents/code-editing-agent";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 
 /**
  * Agent tools for workspace interactions
@@ -11,7 +12,28 @@ import { executeCodeEdit } from "./agents/code-editing-agent";
  * @see https://ai-sdk.dev/docs/ai-sdk-core/generating-structured-data
  */
 
-export function createAgentTools(workspaceId: string) {
+/**
+ * Helper function to unescape content that may have literal \n, \t, etc.
+ * LLMs sometimes generate code with escaped characters instead of actual newlines
+ */
+function unescapeContent(content: string): string {
+  return content
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\r/g, "\r")
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, "\\");
+}
+
+export function createAgentTools(
+  workspaceId: string,
+  apiKey: string,
+  modelName: string
+) {
+  // Create a language model instance for sub-agents using the same model as the main agent
+  const openrouter = createOpenRouter({ apiKey });
+  const agentModel = openrouter.languageModel(modelName);
   return {
     readFile: tool({
       description: "Read the contents of a file from the workspace",
@@ -31,7 +53,8 @@ export function createAgentTools(workspaceId: string) {
     }),
 
     writeFile: tool({
-      description: "Write or create a file in the workspace",
+      description:
+        "Write or create a file in the workspace. Content will be automatically unescaped (\\n becomes newlines, etc.)",
       inputSchema: z.object({
         path: z
           .string()
@@ -40,7 +63,9 @@ export function createAgentTools(workspaceId: string) {
       }),
       execute: async ({ path, content }) => {
         try {
-          await containerAPI.writeFile(workspaceId, path, content);
+          // Unescape content in case LLM generated literal \n instead of newlines
+          const unescapedContent = unescapeContent(content);
+          await containerAPI.writeFile(workspaceId, path, unescapedContent);
           return {
             success: true,
             message: `File ${path} written successfully`,
@@ -257,6 +282,7 @@ export function createAgentTools(workspaceId: string) {
             startUrl: urls && urls[0],
             maxSteps: 20,
             performanceMode: "balanced",
+            model: agentModel,
           });
           return result;
         } catch (error: any) {
@@ -298,6 +324,7 @@ export function createAgentTools(workspaceId: string) {
             instruction,
             files,
             context,
+            model: agentModel,
           });
           return result;
         } catch (error: any) {

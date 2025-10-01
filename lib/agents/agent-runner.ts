@@ -126,7 +126,18 @@ class AgentRunner {
       });
 
       // Allocate port for agent communication (single port)
+      // This checks BOTH database AND OS-level availability
       let agentPort = await this.portManager.allocateAgentPort();
+
+      // CRITICAL: Reserve the port in database IMMEDIATELY to prevent race conditions
+      // This ensures no other agent can get the same port while we create the container
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          agentPort, // Reserve port immediately
+        },
+      });
+      console.log(`🔒 Reserved port ${agentPort} for agent ${agentId}`);
 
       // Get user details for git configuration
       const user = await prisma.user.findUnique({
@@ -169,7 +180,17 @@ class AgentRunner {
             console.log(
               `⚠️ Port ${agentPort} binding failed, finding alternative (attempt ${retries}/${maxRetries})...`
             );
+            // Find alternative and update DB immediately
             agentPort = await this.portManager.findAlternativePort(agentPort);
+            await prisma.agent.update({
+              where: { id: agentId },
+              data: {
+                agentPort, // Update to new port
+              },
+            });
+            console.log(
+              `🔒 Reserved alternative port ${agentPort} for agent ${agentId}`
+            );
           } else {
             // Not a port error, rethrow
             throw error;
@@ -185,7 +206,6 @@ class AgentRunner {
         where: { id: agentId },
         data: {
           containerId,
-          agentPort,
           status: "RUNNING",
         },
       });

@@ -307,7 +307,7 @@ export class DeploymentManager {
     // Run build command if specified
     if (deployment.buildCommand) {
       await onLog?.(`Running build command: ${deployment.buildCommand}`);
-      const buildResult = await this.execInContainer(
+      const buildResult = await this.execInContainerSh(
         workspaceContainer,
         deployment.buildCommand,
         deployment.workingDir || "/workspace",
@@ -676,7 +676,7 @@ export class DeploymentManager {
       Env: env,
       Labels: labels,
       WorkingDir: deployment.workingDir || "/workspace",
-      Cmd: ["/bin/bash", "-c", deployment.startCommand],
+      Cmd: ["/bin/sh", "-c", deployment.startCommand],
       ExposedPorts: {
         [`${deployment.port}/tcp`]: {},
       },

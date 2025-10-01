@@ -19,13 +19,11 @@ export async function POST(
 
   const { id: deploymentId } = await params;
 
-  // Verify ownership
+  // Verify ownership (both standalone and workspace-based deployments)
   const deployment = await prisma.deployment.findFirst({
     where: {
       id: deploymentId,
-      workspace: {
-        userId: session.user.id,
-      },
+      userId: session.user.id,
     },
   });
 
@@ -57,12 +55,17 @@ export async function POST(
 
     const container = docker.getContainer(deployment.containerId);
 
+    // Determine working directory based on deployment type
+    const workingDir =
+      deployment.workingDir ||
+      (deployment.githubRepo ? "/app/repo" : "/workspace");
+
     // Create exec instance
     const exec = await container.exec({
-      Cmd: ["/bin/bash", "-c", command],
+      Cmd: ["/bin/sh", "-c", command],
       AttachStdout: true,
       AttachStderr: true,
-      WorkingDir: deployment.workingDir || "/workspace",
+      WorkingDir: workingDir,
     });
 
     const stream = await exec.start({ Detach: false });

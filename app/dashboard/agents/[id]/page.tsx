@@ -28,7 +28,10 @@ import {
   Brain,
 } from "lucide-react";
 import { useRouter, useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
 
 interface Agent {
   id: string;
@@ -66,9 +69,11 @@ interface ToolCall {
 
 interface EditedFile {
   path: string;
-  originalContent: string;
-  newContent: string;
-  diff: string;
+  operation: "created" | "modified" | "deleted";
+  timestamp: string;
+  originalContent?: string;
+  newContent?: string;
+  diff?: string;
 }
 
 const TOOL_ICONS: Record<string, React.ComponentType<any>> = {
@@ -122,6 +127,10 @@ export default function AgentDetailPage() {
   const [isLiveStreaming, setIsLiveStreaming] = useState(false);
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
 
+  // Refs for auto-scrolling
+  const activityEndRef = useRef<HTMLDivElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     if (agentId) {
       fetchAgent();
@@ -130,10 +139,25 @@ export default function AgentDetailPage() {
     }
   }, [agentId]);
 
+  // Auto-scroll activity when tool calls change
+  useEffect(() => {
+    if (activityEndRef.current && !showChat) {
+      activityEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [toolCalls, showChat]);
+
+  // Auto-scroll chat when conversation or streaming changes
+  useEffect(() => {
+    if (chatEndRef.current && showChat) {
+      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [conversation, streamingText, showChat]);
+
   const connectToStream = () => {
     if (!agentId) return;
 
     const eventSource = new EventSource(`/api/agents/${agentId}/stream`);
+    let updateTimeout: NodeJS.Timeout | null = null;
 
     eventSource.onmessage = (event) => {
       try {
@@ -162,23 +186,44 @@ export default function AgentDetailPage() {
             break;
 
           case "tool-call":
-            setLiveToolCalls((prev) => [...prev, data.toolCall]);
-            setToolCalls((prev) => [...prev, data.toolCall]);
+            // Batch tool call updates to reduce re-renders
+            setToolCalls((prev) => {
+              const exists = prev.some((tc) => tc.id === data.toolCall.id);
+              return exists ? prev : [...prev, data.toolCall];
+            });
             break;
 
           case "message":
-            setLiveMessages((prev) => [...prev, data.message]);
-            setConversation((prev) => [...prev, data.message]);
+            // Batch message updates to reduce re-renders
+            setConversation((prev) => {
+              const exists = prev.some(
+                (msg) =>
+                  msg.timestamp === data.message.timestamp &&
+                  msg.role === data.message.role
+              );
+              return exists ? prev : [...prev, data.message];
+            });
             setStreamingText(""); // Clear streaming text when message completes
             break;
 
           case "streaming":
-            // Update the streaming text for the current message
-            setStreamingText(data.content);
+            // Debounce streaming updates for smoother rendering
+            if (updateTimeout) {
+              clearTimeout(updateTimeout);
+            }
+            updateTimeout = setTimeout(() => {
+              setStreamingText(data.content);
+            }, 50); // 50ms debounce for smoother updates
             break;
 
           case "files":
-            setFilesEdited(data.files);
+            setFilesEdited((prev) => {
+              // Only update if files actually changed
+              if (JSON.stringify(prev) === JSON.stringify(data.files)) {
+                return prev;
+              }
+              return data.files;
+            });
             if (data.files.length > 0 && !selectedFile) {
               setSelectedFile(data.files[0]);
             }
@@ -187,6 +232,9 @@ export default function AgentDetailPage() {
           case "done":
             setIsLiveStreaming(false);
             setStreamingText("");
+            if (updateTimeout) {
+              clearTimeout(updateTimeout);
+            }
             fetchAgent(); // Fetch final state
             break;
 
@@ -202,6 +250,9 @@ export default function AgentDetailPage() {
       console.error("SSE error:", error);
       setIsLiveStreaming(false);
       eventSource.close();
+      if (updateTimeout) {
+        clearTimeout(updateTimeout);
+      }
 
       // Fallback to polling if SSE fails
       const interval = setInterval(fetchAgent, 3000);
@@ -212,6 +263,9 @@ export default function AgentDetailPage() {
     return () => {
       eventSource.close();
       setIsLiveStreaming(false);
+      if (updateTimeout) {
+        clearTimeout(updateTimeout);
+      }
     };
   };
 
@@ -249,6 +303,9 @@ export default function AgentDetailPage() {
     if (!chatMessage.trim()) return;
 
     setSendingChat(true);
+    // Stay on chat tab when sending
+    setShowChat(true);
+
     try {
       const res = await fetch(`/api/agents/${agentId}/chat`, {
         method: "POST",
@@ -287,6 +344,9 @@ export default function AgentDetailPage() {
     if (!chatMessage.trim()) return;
 
     setResuming(true);
+    // Stay on chat tab when resuming
+    setShowChat(true);
+
     try {
       const res = await fetch(`/api/agents/${agentId}/resume`, {
         method: "POST",
@@ -296,7 +356,6 @@ export default function AgentDetailPage() {
 
       if (res.ok) {
         setChatMessage("");
-        setShowChat(false);
         await fetchAgent();
       } else {
         const error = await res.json();
@@ -546,11 +605,50 @@ export default function AgentDetailPage() {
                         <h3 className="text-sm font-medium text-zinc-300 mb-2">
                           {selectedFile.path}
                         </h3>
+                        <div className="flex items-center gap-3 text-xs text-zinc-500">
+                          <span className="flex items-center gap-1">
+                            <span className="inline-block w-2 h-2 rounded-full bg-emerald-500/50"></span>
+                            {selectedFile.operation === "created"
+                              ? "Created"
+                              : "Modified"}
+                          </span>
+                        </div>
                       </div>
                       <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-lg overflow-hidden">
-                        <pre className="p-4 text-xs text-zinc-300 overflow-x-auto">
-                          {selectedFile.diff || "No diff available"}
-                        </pre>
+                        {selectedFile.diff ? (
+                          <div className="font-mono text-xs">
+                            {selectedFile.diff.split("\n").map((line, idx) => {
+                              const isAddition = line.startsWith("+ ");
+                              const isDeletion = line.startsWith("- ");
+                              const isUnchanged = line.startsWith("  ");
+
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`px-4 py-0.5 ${
+                                    isAddition
+                                      ? "bg-emerald-500/10 text-emerald-300"
+                                      : isDeletion
+                                      ? "bg-red-500/10 text-red-300"
+                                      : "text-zinc-400"
+                                  }`}
+                                >
+                                  <span className="select-none text-zinc-600 mr-2 inline-block w-8 text-right">
+                                    {idx + 1}
+                                  </span>
+                                  <span className="select-none mr-1 text-zinc-600">
+                                    {isAddition ? "+" : isDeletion ? "-" : " "}
+                                  </span>
+                                  {line.substring(2) || " "}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="p-4 text-xs text-zinc-500 text-center">
+                            No diff available
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
@@ -591,48 +689,61 @@ export default function AgentDetailPage() {
             </div>
 
             {!showChat ? (
-              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              <div className="flex-1 overflow-y-auto p-3 space-y-2">
                 {toolCalls.length === 0 ? (
-                  <p className="text-sm text-zinc-500">No activity yet</p>
+                  <p className="text-xs text-zinc-500">No activity yet</p>
                 ) : (
-                  toolCalls.map((call, idx) => (
-                    <Card
-                      key={idx}
-                      className="p-3 bg-zinc-900/50 border-zinc-800/50"
-                    >
-                      <div className="flex items-start gap-2">
-                        <Activity className="h-4 w-4 text-emerald-400 mt-0.5" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-zinc-300">
-                            {call.function?.name || call.type}
-                          </p>
-                          {call.function?.arguments && (
-                            <pre className="mt-1 text-xs text-zinc-500 overflow-x-auto">
-                              {JSON.stringify(
-                                JSON.parse(call.function.arguments),
-                                null,
-                                2
+                  <>
+                    {toolCalls.map((call, idx) => {
+                      const IconComponent =
+                        TOOL_ICONS[call.function?.name || call.type] ||
+                        Activity;
+                      return (
+                        <Card
+                          key={idx}
+                          className="p-2.5 bg-zinc-900/50 border-zinc-800/50"
+                        >
+                          <div className="flex items-start gap-2">
+                            <div className="h-4 w-4 rounded bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                              <IconComponent className="h-2.5 w-2.5 text-emerald-500" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium text-zinc-300">
+                                {(call.function?.name || call.type)
+                                  .replace(/([A-Z])/g, " $1")
+                                  .replace(/_/g, " ")
+                                  .trim()}
+                              </p>
+                              {call.function?.arguments && (
+                                <pre className="mt-1 text-[10px] text-zinc-500 overflow-x-auto max-h-20 overflow-y-auto">
+                                  {JSON.stringify(
+                                    JSON.parse(call.function.arguments),
+                                    null,
+                                    2
+                                  )}
+                                </pre>
                               )}
-                            </pre>
-                          )}
-                          <p className="mt-1 text-xs text-zinc-600">
-                            {new Date(call.timestamp).toLocaleTimeString()}
-                          </p>
-                        </div>
-                      </div>
-                    </Card>
-                  ))
+                              <p className="mt-1 text-[10px] text-zinc-600">
+                                {new Date(call.timestamp).toLocaleTimeString()}
+                              </p>
+                            </div>
+                          </div>
+                        </Card>
+                      );
+                    })}
+                    <div ref={activityEndRef} />
+                  </>
                 )}
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto p-4">
+              <div className="flex-1 overflow-y-auto p-3">
                 {conversation.length === 0 &&
                 !streamingText &&
                 toolCalls.length === 0 ? (
                   <div className="h-full flex items-center justify-center">
                     <div className="text-center max-w-md">
-                      <div className="mb-3 text-3xl">⚡</div>
-                      <p className="text-sm text-zinc-500">
+                      <div className="mb-2 text-2xl">⚡</div>
+                      <p className="text-xs text-zinc-500">
                         Agent ready. Conversation will appear here.
                       </p>
                     </div>
@@ -640,18 +751,18 @@ export default function AgentDetailPage() {
                 ) : (
                   <div className="max-w-3xl mx-auto space-y-4">
                     {conversation.map((msg, idx) => (
-                      <div key={idx} className="space-y-2">
+                      <div key={idx} className="space-y-3">
                         {/* User Messages */}
                         {msg.role === "user" && (
                           <div className="space-y-2">
-                            <div className="flex items-center gap-2 mb-1">
+                            <div className="flex items-center gap-2 mb-2">
                               <div className="h-5 w-5 rounded-md bg-zinc-800/50 flex items-center justify-center">
                                 <span className="text-[10px] text-zinc-400">
                                   You
                                 </span>
                               </div>
                             </div>
-                            <div className="text-sm text-zinc-200 leading-relaxed">
+                            <div className="text-sm text-zinc-200 leading-loose">
                               {msg.content}
                             </div>
                           </div>
@@ -668,8 +779,76 @@ export default function AgentDetailPage() {
                                 Agent
                               </span>
                             </div>
-                            <div className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                              {msg.content}
+                            <div className="text-sm text-zinc-300 prose prose-invert prose-sm max-w-none">
+                              <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                rehypePlugins={[rehypeHighlight]}
+                                components={{
+                                  p: ({ children }) => (
+                                    <p className="mb-4 leading-relaxed">
+                                      {children}
+                                    </p>
+                                  ),
+                                  code: ({ inline, children, ...props }: any) =>
+                                    inline ? (
+                                      <code
+                                        className="px-1.5 py-0.5 bg-zinc-800/50 text-emerald-400 rounded text-xs font-mono"
+                                        {...props}
+                                      >
+                                        {children}
+                                      </code>
+                                    ) : (
+                                      <code
+                                        className="block bg-zinc-900/50 p-4 rounded-lg my-3 text-xs overflow-x-auto border border-zinc-800/30 font-mono"
+                                        {...props}
+                                      >
+                                        {children}
+                                      </code>
+                                    ),
+                                  pre: ({ children }) => (
+                                    <pre className="bg-zinc-900/50 border border-zinc-800/30 rounded-lg p-4 my-3 overflow-x-auto">
+                                      {children}
+                                    </pre>
+                                  ),
+                                  ul: ({ children }) => (
+                                    <ul className="list-disc list-inside mb-4 space-y-1.5">
+                                      {children}
+                                    </ul>
+                                  ),
+                                  ol: ({ children }) => (
+                                    <ol className="list-decimal list-inside mb-4 space-y-1.5">
+                                      {children}
+                                    </ol>
+                                  ),
+                                  li: ({ children }) => (
+                                    <li className="text-zinc-400 leading-relaxed">
+                                      {children}
+                                    </li>
+                                  ),
+                                  h1: ({ children }) => (
+                                    <h1 className="text-lg font-bold text-zinc-100 mb-3 mt-5">
+                                      {children}
+                                    </h1>
+                                  ),
+                                  h2: ({ children }) => (
+                                    <h2 className="text-base font-semibold text-zinc-100 mb-3 mt-4">
+                                      {children}
+                                    </h2>
+                                  ),
+                                  h3: ({ children }) => (
+                                    <h3 className="text-sm font-semibold text-zinc-200 mb-2 mt-3">
+                                      {children}
+                                    </h3>
+                                  ),
+                                  blockquote: ({ children }) => (
+                                    <blockquote className="border-l-2 border-emerald-500/30 pl-4 py-2 my-3 text-zinc-400 italic">
+                                      {children}
+                                    </blockquote>
+                                  ),
+                                }}
+                              >
+                                {msg.content}
+                              </ReactMarkdown>
                             </div>
                           </div>
                         )}
@@ -678,7 +857,7 @@ export default function AgentDetailPage() {
 
                     {/* Tool Calls */}
                     {toolCalls.length > 0 && (
-                      <div className="space-y-2">
+                      <div className="space-y-3">
                         {toolCalls.map((toolCall) => {
                           const isExpanded = expandedTools.has(toolCall.id);
                           const IconComponent =
@@ -762,8 +941,36 @@ export default function AgentDetailPage() {
                             Agent
                           </span>
                         </div>
-                        <div className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                          {streamingText}
+                        <div className="text-sm text-zinc-300 prose prose-invert prose-sm max-w-none">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            rehypePlugins={[rehypeHighlight]}
+                            components={{
+                              p: ({ children }) => (
+                                <p className="mb-4 leading-relaxed">
+                                  {children}
+                                </p>
+                              ),
+                              code: ({ inline, children, ...props }: any) =>
+                                inline ? (
+                                  <code
+                                    className="px-1.5 py-0.5 bg-zinc-800/50 text-emerald-400 rounded text-xs font-mono"
+                                    {...props}
+                                  >
+                                    {children}
+                                  </code>
+                                ) : (
+                                  <code
+                                    className="block bg-zinc-900/50 p-4 rounded-lg my-3 text-xs overflow-x-auto border border-zinc-800/30 font-mono"
+                                    {...props}
+                                  >
+                                    {children}
+                                  </code>
+                                ),
+                            }}
+                          >
+                            {streamingText}
+                          </ReactMarkdown>
                         </div>
                         <div className="flex items-center gap-2 text-zinc-600 text-xs">
                           <Loader2 className="h-3 w-3 animate-spin" />
@@ -771,6 +978,7 @@ export default function AgentDetailPage() {
                         </div>
                       </div>
                     )}
+                    <div ref={chatEndRef} />
                   </div>
                 )}
               </div>
@@ -778,17 +986,20 @@ export default function AgentDetailPage() {
 
             {/* Chat/Instruction Input */}
             {showChat ? (
-              <div className="border-t border-zinc-800/50 p-4 bg-zinc-900/30">
-                <div className="flex items-center gap-2 mb-2">
-                  <MessageSquare className="h-4 w-4 text-zinc-400" />
-                  <p className="text-xs text-zinc-500">
+              <div className="border-t border-zinc-800/50 px-3 py-2 bg-zinc-900/30">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <MessageSquare className="h-3.5 w-3.5 text-zinc-400" />
+                  <p className="text-[10px] text-zinc-500">
                     {agent.status === "COMPLETED" || agent.status === "IDLE"
                       ? "Resume with new task or ask questions"
                       : "Chat with the agent"}
                   </p>
                 </div>
-                <div className="space-y-2">
-                  <Input
+
+                {/* Modern Textarea with Embedded Buttons */}
+                <div className="relative bg-zinc-900/50 border border-zinc-800/60 rounded-lg hover:border-zinc-700/80 focus-within:border-emerald-500/40 transition-colors">
+                  <textarea
+                    rows={2}
                     value={chatMessage}
                     onChange={(e) => setChatMessage(e.target.value)}
                     placeholder={
@@ -796,7 +1007,7 @@ export default function AgentDetailPage() {
                         ? "Give agent a new task..."
                         : "Send a message..."
                     }
-                    className="bg-zinc-800/50 border-zinc-700/50 text-sm"
+                    className="w-full bg-transparent px-3 pt-2 pb-9 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none resize-none"
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
@@ -811,68 +1022,79 @@ export default function AgentDetailPage() {
                       }
                     }}
                   />
-                  <div className="flex gap-2">
-                    {(agent.status === "COMPLETED" ||
-                      agent.status === "IDLE") && (
-                      <Button
-                        size="sm"
-                        onClick={handleResumeAgent}
-                        disabled={resuming || !chatMessage.trim()}
-                        className="flex-1 bg-purple-600 text-white hover:bg-purple-500"
+
+                  {/* Button Row Inside Textarea */}
+                  <div className="absolute bottom-1.5 left-2 right-2 flex items-center justify-between">
+                    <div className="text-[10px] text-zinc-600">
+                      {chatMessage.length > 0 && `${chatMessage.length} chars`}
+                    </div>
+                    <div className="flex gap-1.5">
+                      {(agent.status === "COMPLETED" ||
+                        agent.status === "IDLE") && (
+                        <button
+                          onClick={handleResumeAgent}
+                          disabled={resuming || !chatMessage.trim()}
+                          className="h-6 px-2.5 bg-purple-600/90 hover:bg-purple-600 disabled:bg-zinc-800 disabled:opacity-50 rounded-md flex items-center gap-1 transition-colors text-[10px] font-medium text-white disabled:cursor-not-allowed"
+                        >
+                          {resuming ? (
+                            <>
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              <span>Resuming...</span>
+                            </>
+                          ) : (
+                            <>
+                              <PlayCircle className="h-3 w-3" />
+                              <span>Resume</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                      <button
+                        onClick={
+                          agent.status === "COMPLETED" ||
+                          agent.status === "IDLE"
+                            ? handleSendChat
+                            : handleSendChat
+                        }
+                        disabled={sendingChat || !chatMessage.trim()}
+                        className="h-6 px-2.5 bg-emerald-600/90 hover:bg-emerald-600 disabled:bg-zinc-800 disabled:opacity-50 rounded-md flex items-center gap-1 transition-colors text-[10px] font-medium text-white disabled:cursor-not-allowed"
                       >
-                        {resuming ? (
+                        {sendingChat ? (
                           <>
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            Resuming...
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            <span>Sending...</span>
                           </>
                         ) : (
                           <>
-                            <PlayCircle className="h-4 w-4 mr-2" />
-                            Resume Agent
+                            <Send className="h-3 w-3" />
+                            <span>
+                              {agent.status === "COMPLETED" ||
+                              agent.status === "IDLE"
+                                ? "Ask"
+                                : "Send"}
+                            </span>
                           </>
                         )}
-                      </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      onClick={handleSendChat}
-                      disabled={sendingChat || !chatMessage.trim()}
-                      className={
-                        agent.status === "COMPLETED" || agent.status === "IDLE"
-                          ? "flex-1 bg-emerald-600 text-white hover:bg-emerald-500"
-                          : "flex-1 bg-emerald-600 text-white hover:bg-emerald-500"
-                      }
-                    >
-                      {sendingChat ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <>
-                          <Send className="h-4 w-4 mr-2" />
-                          {agent.status === "COMPLETED" ||
-                          agent.status === "IDLE"
-                            ? "Ask"
-                            : "Send"}
-                        </>
-                      )}
-                    </Button>
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
             ) : (
               agent.status === "RUNNING" && (
-                <div className="border-t border-zinc-800/50 p-4 bg-zinc-900/30">
-                  <div className="flex items-center gap-2">
-                    <MessageSquare className="h-4 w-4 text-zinc-400" />
-                    <p className="text-xs text-zinc-500">
+                <div className="border-t border-zinc-800/50 p-3 bg-zinc-900/30">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <MessageSquare className="h-3.5 w-3.5 text-zinc-400" />
+                    <p className="text-[10px] text-zinc-500">
                       Send additional instructions
                     </p>
                   </div>
-                  <div className="flex gap-2 mt-2">
+                  <div className="flex gap-1.5">
                     <Input
                       value={instruction}
                       onChange={(e) => setInstruction(e.target.value)}
                       placeholder="Add to queue..."
-                      className="bg-zinc-800/50 border-zinc-700/50 text-sm"
+                      className="bg-zinc-800/50 border-zinc-700/50 text-xs h-7"
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
@@ -884,12 +1106,12 @@ export default function AgentDetailPage() {
                       size="sm"
                       onClick={handleSendInstruction}
                       disabled={sending || !instruction.trim()}
-                      className="bg-emerald-600 text-white hover:bg-emerald-500"
+                      className="bg-emerald-600 text-white hover:bg-emerald-500 h-7 w-7 p-0"
                     >
                       {sending ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
-                        <Send className="h-4 w-4" />
+                        <Send className="h-3.5 w-3.5" />
                       )}
                     </Button>
                   </div>

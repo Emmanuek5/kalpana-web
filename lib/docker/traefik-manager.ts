@@ -2,9 +2,10 @@ import Docker from "dockerode";
 import { prisma } from "@/lib/db";
 
 export interface TraefikConfig {
-  baseUrl?: string; // e.g., "example.com"
-  email?: string; // For Let's Encrypt
-  network?: string; // Docker network name
+  baseUrl?: string; // OPTIONAL: Default domain for testing (e.g., "kalpana.local")
+  // NOTE: Actual routing uses domains from database!
+  email?: string; // For Let's Encrypt SSL certificates
+  network?: string; // Docker network name (default: "traefik-proxy")
 }
 
 export class TraefikManager {
@@ -145,7 +146,9 @@ export class TraefikManager {
       cmd.push(
         "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
       );
-      cmd.push(`--certificatesresolvers.letsencrypt.acme.email=${this.config.email}`);
+      cmd.push(
+        `--certificatesresolvers.letsencrypt.acme.email=${this.config.email}`
+      );
       cmd.push(
         "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
       );
@@ -246,18 +249,34 @@ export class TraefikManager {
   }
 
   /**
-   * Check if Traefik is enabled (base URL is set)
+   * Check if Traefik is enabled
+   * Traefik is enabled if:
+   * 1. Base URL is set in env (for initial setup), OR
+   * 2. Any verified domains exist in database (dynamic routing)
    */
-  isEnabled(): boolean {
-    return !!this.config.baseUrl;
+  async isEnabled(): Promise<boolean> {
+    // Check env var first (for initial setup)
+    if (this.config.baseUrl) {
+      return true;
+    }
+
+    // Check if any verified domains exist in database
+    const domainCount = await prisma.domain.count({
+      where: { verified: true },
+    });
+
+    return domainCount > 0;
   }
 
   /**
    * Get deployment URL
+   * @param subdomain - The subdomain (e.g., "api")
+   * @param domain - The domain from DATABASE (e.g., "example.com")
+   * @returns Full URL (e.g., "https://api.example.com")
    */
-  getDeploymentUrl(subdomain: string, baseUrl?: string): string {
-    if (baseUrl) {
-      return `https://${subdomain}.${baseUrl}`;
+  getDeploymentUrl(subdomain: string, domain?: string): string {
+    if (domain) {
+      return `https://${subdomain}.${domain}`;
     }
     return ""; // Port-based access
   }

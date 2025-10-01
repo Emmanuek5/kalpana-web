@@ -812,6 +812,7 @@ const httpServer = createServer(async (req, res) => {
       console.log(`📥 Received task request:`, {
         taskLength: task?.length || 0,
         hasApiKey: !!apiKey,
+        apiKeyPreview: apiKey ? `${apiKey.substring(0, 8)}...` : "none",
         model: model || "default",
         historyLength: conversationHistory?.length || 0,
       });
@@ -829,6 +830,7 @@ const httpServer = createServer(async (req, res) => {
         return;
       }
 
+      console.log(`🔑 Using API key: ${effectiveApiKey.substring(0, 8)}...`);
       console.log(`🤖 Initializing agent with model: ${model}`);
 
       // Initialize agent executor
@@ -851,6 +853,19 @@ const httpServer = createServer(async (req, res) => {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
+      });
+
+      // Set up tool call callback to stream tool calls
+      agentExecutor.setToolCallCallback((toolCall) => {
+        console.log(`🔧 [Server] Tool call: ${toolCall.name}`);
+        res.write(
+          `data: ${JSON.stringify({
+            type: "tool-call",
+            toolName: toolCall.name,
+            toolCallId: toolCall.id,
+            args: toolCall.arguments,
+          })}\n\n`
+        );
       });
 
       console.log(`🎯 [Server] Starting to stream agent execution response...`);

@@ -78,7 +78,7 @@ export interface LocalAgentOptions {
   maxSteps?: number;
   performanceMode?: "fast" | "balanced" | "thorough";
   maxFindings?: number;
-  model?: any; // Passed from main agent
+  model: any; // Required: Language model from main agent (uses user's API key)
 }
 
 export async function runLocalAgent(options: LocalAgentOptions) {
@@ -98,6 +98,13 @@ export async function runLocalAgent(options: LocalAgentOptions) {
   const history: Array<{ action: Tool; result: any }> = [];
 
   try {
+    // Model must be provided from the main agent to use user's API key
+    if (!model) {
+      throw new Error("Model is required for web research agent");
+    }
+
+    const agentModel = model;
+
     // Initialize browser
     await initBrowser();
 
@@ -106,13 +113,6 @@ export async function runLocalAgent(options: LocalAgentOptions) {
       startUrl || `https://www.google.com/search?q=${encodeURIComponent(task)}`;
     await goToPage(initialUrl);
     visitedUrls.add(initialUrl);
-
-    // Use the same model as main agent, or default
-    const agentModel =
-      model ||
-      createOpenRouter({
-        apiKey: process.env.OPENROUTER_API_KEY!,
-      }).languageModel("anthropic/claude-3.5-sonnet");
 
     for (let step = 0; step < maxSteps; step++) {
       // Observe current page state
@@ -170,11 +170,15 @@ export async function runLocalAgent(options: LocalAgentOptions) {
       history,
     };
   } catch (error: any) {
+    console.error("Web research agent error:", error);
     return {
       success: false,
-      error: error.message,
+      error: error.message || "Web research failed",
       findings,
       history,
+      note: error.message?.includes("parse")
+        ? "This model may not support structured output well. Try Claude 3.5 Sonnet or GPT-4."
+        : undefined,
     };
   } finally {
     await closeBrowser();
@@ -325,13 +329,27 @@ Guidelines:
 
 Return the next single action to take.`;
 
-  const { object: action } = await generateObject({
-    model,
-    schema: toolSchemas,
-    prompt,
-  });
+  try {
+    const { object: action } = await generateObject({
+      model,
+      schema: toolSchemas,
+      prompt,
+      mode: "json", // Explicitly request JSON mode for better compatibility
+    });
 
-  return action;
+    return action;
+  } catch (error: any) {
+    console.error("Web research agent - generateObject error:", error);
+    console.error("Model:", model);
+    console.error("Error details:", error.message);
+
+    // Fallback: If structured generation fails, finish the task
+    // This prevents the agent from getting stuck
+    return {
+      tool: "finishTask",
+      result: `Unable to continue research due to model output parsing error: ${error.message}. Please try using a different model that supports structured output better (e.g., Claude 3.5 Sonnet or GPT-4).`,
+    };
+  }
 }
 
 async function executeAction(action: Tool): Promise<any> {

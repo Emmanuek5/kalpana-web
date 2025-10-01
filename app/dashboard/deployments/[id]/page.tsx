@@ -34,7 +34,10 @@ import {
   Github,
   Code,
   Terminal,
+  FolderOpen,
 } from "lucide-react";
+import { DeploymentTerminalInline } from "@/components/deployments/deployment-terminal-inline";
+import { DeploymentFileManagerInline } from "@/components/deployments/deployment-file-manager-inline";
 
 interface Deployment {
   id: string;
@@ -96,7 +99,7 @@ export default function DeploymentDetailPage() {
   const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<
-    "overview" | "builds" | "settings" | "domains"
+    "overview" | "builds" | "settings" | "domains" | "terminal" | "files"
   >("overview");
   const [deploying, setDeploying] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -710,6 +713,48 @@ export default function DeploymentDetailPage() {
               <Globe className="h-4 w-4 inline mr-2" />
               Domains
             </button>
+            <button
+              onClick={() => setActiveTab("terminal")}
+              disabled={deployment.status !== "RUNNING"}
+              className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
+                deployment.status !== "RUNNING"
+                  ? "opacity-50 cursor-not-allowed"
+                  : ""
+              } ${
+                activeTab === "terminal"
+                  ? "border-emerald-500 text-emerald-400"
+                  : "border-transparent text-zinc-500 hover:text-zinc-300"
+              }`}
+              title={
+                deployment.status !== "RUNNING"
+                  ? "Start deployment to use terminal"
+                  : ""
+              }
+            >
+              <Terminal className="h-4 w-4 inline mr-2" />
+              Terminal
+            </button>
+            <button
+              onClick={() => setActiveTab("files")}
+              disabled={deployment.status !== "RUNNING"}
+              className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
+                deployment.status !== "RUNNING"
+                  ? "opacity-50 cursor-not-allowed"
+                  : ""
+              } ${
+                activeTab === "files"
+                  ? "border-emerald-500 text-emerald-400"
+                  : "border-transparent text-zinc-500 hover:text-zinc-300"
+              }`}
+              title={
+                deployment.status !== "RUNNING"
+                  ? "Start deployment to browse files"
+                  : ""
+              }
+            >
+              <FolderOpen className="h-4 w-4 inline mr-2" />
+              Files
+            </button>
           </div>
         </div>
 
@@ -827,6 +872,33 @@ export default function DeploymentDetailPage() {
                     </div>
                   </div>
                 </Card>
+
+                {/* Quick Actions */}
+                {deployment.status === "RUNNING" && (
+                  <Card className="p-6 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 backdrop-blur-xl">
+                    <h3 className="text-lg font-semibold text-zinc-100 mb-4">
+                      Quick Actions
+                    </h3>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Button
+                        variant="outline"
+                        onClick={() => setActiveTab("terminal")}
+                        className="border-zinc-800 justify-start"
+                      >
+                        <Terminal className="h-4 w-4 mr-2 text-emerald-400" />
+                        Open Terminal
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setActiveTab("files")}
+                        className="border-zinc-800 justify-start"
+                      >
+                        <FolderOpen className="h-4 w-4 mr-2 text-blue-400" />
+                        Browse Files
+                      </Button>
+                    </div>
+                  </Card>
+                )}
 
                 {/* Latest Build */}
                 {builds.length > 0 && (
@@ -1329,6 +1401,22 @@ export default function DeploymentDetailPage() {
                   </Button>
                 </div>
               </div>
+            )}
+
+            {/* Terminal Tab */}
+            {activeTab === "terminal" && (
+              <DeploymentTerminalInline
+                deploymentId={deployment.id}
+                deploymentName={deployment.name}
+              />
+            )}
+
+            {/* Files Tab */}
+            {activeTab === "files" && (
+              <DeploymentFileManagerInline
+                deploymentId={deployment.id}
+                deploymentName={deployment.name}
+              />
             )}
 
             {/* Domains Tab */}

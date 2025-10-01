@@ -12,6 +12,12 @@ interface AgentState {
   toolCallsCount: number;
   isExecuting: boolean;
   lastError?: string;
+  toolCalls: Array<{
+    id: string;
+    name: string;
+    arguments: any;
+    timestamp: string;
+  }>;
 }
 
 interface AgentStateWithFiles extends AgentState {
@@ -27,14 +33,31 @@ export class AgentExecutor {
     conversationHistory: [],
     toolCallsCount: 0,
     isExecuting: false,
+    toolCalls: [],
   };
 
   private apiKey: string;
   private model: string;
+  private toolCallCallback?: (toolCall: {
+    id: string;
+    name: string;
+    arguments: any;
+    timestamp: string;
+  }) => void;
 
   constructor(apiKey: string, model: string = "anthropic/claude-3.5-sonnet") {
+    if (!apiKey || apiKey.trim() === "") {
+      throw new Error("OpenRouter API key is required and cannot be empty");
+    }
     this.apiKey = apiKey;
     this.model = model;
+    console.log(
+      `🔑 [AgentExecutor] Initialized with API key: ${apiKey.substring(
+        0,
+        8
+      )}...`
+    );
+    console.log(`🤖 [AgentExecutor] Model: ${model}`);
     // Clear any previous file edits
     clearEditedFiles();
   }
@@ -54,6 +77,20 @@ export class AgentExecutor {
    */
   setConversationHistory(messages: CoreMessage[]): void {
     this.state.conversationHistory = messages;
+  }
+
+  /**
+   * Set callback for tool calls
+   */
+  setToolCallCallback(
+    callback: (toolCall: {
+      id: string;
+      name: string;
+      arguments: any;
+      timestamp: string;
+    }) => void
+  ): void {
+    this.toolCallCallback = callback;
   }
 
   /**
@@ -104,6 +141,27 @@ export class AgentExecutor {
         onStepFinish: ({ toolCalls, toolResults, text, finishReason }) => {
           // Track each tool call for display
           this.state.toolCallsCount += toolCalls.length;
+
+          // Record and broadcast each tool call
+          for (let i = 0; i < toolCalls.length; i++) {
+            const toolCall = toolCalls[i];
+            const toolResult = toolResults[i];
+
+            const toolCallInfo = {
+              id: toolCall.toolCallId,
+              name: toolCall.toolName,
+              arguments: toolResult?.args || {},
+              timestamp: new Date().toISOString(),
+            };
+
+            this.state.toolCalls.push(toolCallInfo);
+
+            // Notify callback if set
+            if (this.toolCallCallback) {
+              this.toolCallCallback(toolCallInfo);
+            }
+          }
+
           console.log(
             `🔧 [AgentExecutor] Step completed: ${toolCalls.length} tool calls, ${toolResults.length} results, text length: ${text.length}, finishReason: ${finishReason}`
           );

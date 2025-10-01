@@ -23,7 +23,11 @@ const editActionSchema = z.union([
   z.object({
     action: z.literal("applyEdit"),
     file: z.string(),
-    newContent: z.string().describe("Complete new file content"),
+    newContent: z
+      .string()
+      .describe(
+        "Complete new file content with proper formatting. Use actual newlines, not escaped \\n characters."
+      ),
     summary: z.string().describe("What was changed"),
   }),
   z.object({
@@ -39,11 +43,25 @@ const editActionSchema = z.union([
 
 type EditAction = z.infer<typeof editActionSchema>;
 
+/**
+ * Helper function to unescape content that may have literal \n, \t, etc.
+ * LLMs sometimes generate code with escaped characters instead of actual newlines
+ */
+function unescapeContent(content: string): string {
+  return content
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\r/g, "\r")
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, "\\");
+}
+
 export interface CodeEditTask {
   instruction: string;
   files: Array<{ path: string; content: string }>;
   context?: string;
-  model?: any; // Passed from main agent
+  model: any; // Required: Language model from main agent (uses user's API key)
   maxSteps?: number;
 }
 
@@ -71,14 +89,12 @@ export async function executeCodeEdit(
   let scratchpad = "";
 
   try {
-    // Use the same model as the main agent
-    const agentModel =
-      model ||
-      (await import("@openrouter/ai-sdk-provider").then((m) =>
-        m
-          .createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY! })
-          .languageModel("anthropic/claude-3.5-sonnet")
-      ));
+    // Model must be provided from the main agent to use user's API key
+    if (!model) {
+      throw new Error("Model is required for code editing agent");
+    }
+
+    const agentModel = model;
 
     // Create file map for easy access
     const fileMap = new Map(files.map((f) => [f.path, f.content]));
@@ -197,19 +213,35 @@ ${recentHistory.map((h) => `- ${h.action.action}`).join("\n") || "(none)"}
 Guidelines:
 1. First analyzeCode to understand what needs changing
 2. planEdit to outline the changes
-3. applyEdit to make the actual changes (provide COMPLETE new file content)
+3. applyEdit to make the actual changes (provide COMPLETE new file content with ACTUAL newlines, not escaped \\n)
 4. validateEdit to check your work
 5. finishEditing when all changes are complete
 
+IMPORTANT: When using applyEdit, the newContent must be properly formatted code with real line breaks.
+Do NOT use escaped newlines (\\n) - use actual newlines in the string.
+
 Return the next single action to take.`;
 
-  const { object: action } = await generateObject({
-    model,
-    schema: editActionSchema,
-    prompt,
-  });
+  try {
+    const { object: action } = await generateObject({
+      model,
+      schema: editActionSchema,
+      prompt,
+      mode: "json", // Explicitly request JSON mode for better compatibility
+    });
 
-  return action;
+    return action;
+  } catch (error: any) {
+    console.error("Code editing agent - generateObject error:", error);
+    console.error("Model:", model);
+    console.error("Error details:", error.message);
+
+    // Fallback: If structured generation fails, finish editing
+    return {
+      action: "finishEditing",
+      summary: `Unable to complete code editing due to model output parsing error: ${error.message}. Please try using a different model that supports structured output better (e.g., Claude 3.5 Sonnet or GPT-4).`,
+    };
+  }
 }
 
 async function executeEditAction(
@@ -236,6 +268,9 @@ async function executeEditAction(
     case "applyEdit": {
       const originalContent = fileMap.get(action.file) || "";
 
+      // Unescape content in case LLM generated literal \n instead of newlines
+      const unescapedContent = unescapeContent(action.newContent);
+
       // Check if this file was already edited
       const existingEditIndex = edits.findIndex((e) => e.file === action.file);
 
@@ -244,7 +279,7 @@ async function executeEditAction(
         edits[existingEditIndex] = {
           file: action.file,
           originalContent,
-          newContent: action.newContent,
+          newContent: unescapedContent,
           changesSummary: action.summary,
         };
       } else {
@@ -252,13 +287,13 @@ async function executeEditAction(
         edits.push({
           file: action.file,
           originalContent,
-          newContent: action.newContent,
+          newContent: unescapedContent,
           changesSummary: action.summary,
         });
       }
 
       // Update file map for subsequent edits
-      fileMap.set(action.file, action.newContent);
+      fileMap.set(action.file, unescapedContent);
 
       return {
         success: true,

@@ -29,6 +29,7 @@ import {
   AlertCircle,
   Copy,
   FileText,
+  Edit,
 } from "lucide-react";
 import { DeploymentTerminal } from "./deployment-terminal";
 import { DeploymentLogs } from "./deployment-logs";
@@ -44,7 +45,13 @@ interface Deployment {
   id: string;
   name: string;
   description?: string;
-  status: "STOPPED" | "BUILDING" | "DEPLOYING" | "RUNNING" | "STOPPING" | "ERROR";
+  status:
+    | "STOPPED"
+    | "BUILDING"
+    | "DEPLOYING"
+    | "RUNNING"
+    | "STOPPING"
+    | "ERROR";
   buildCommand?: string;
   startCommand: string;
   workingDir?: string;
@@ -80,12 +87,17 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
   const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [editingDeployment, setEditingDeployment] = useState<Deployment | null>(
+    null
+  );
   const [selectedDeployment, setSelectedDeployment] = useState<string | null>(
     null
   );
   const [deployLogs, setDeployLogs] = useState<string[]>([]);
   const [isDeploying, setIsDeploying] = useState(false);
-  const [terminalDeployment, setTerminalDeployment] = useState<Deployment | null>(null);
+  const [terminalDeployment, setTerminalDeployment] =
+    useState<Deployment | null>(null);
   const [logsDeployment, setLogsDeployment] = useState<Deployment | null>(null);
 
   // Form state
@@ -125,9 +137,11 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
       const res = await fetch("/api/domains");
       if (res.ok) {
         const data = await res.json();
-        const verifiedDomains = (data.domains || []).filter((d: Domain) => d.verified);
+        const verifiedDomains = (data.domains || []).filter(
+          (d: Domain) => d.verified
+        );
         setDomains(verifiedDomains);
-        
+
         // Set default domain as selected if available
         const defaultDomain = verifiedDomains.find((d: Domain) => d.isDefault);
         if (defaultDomain) {
@@ -168,6 +182,55 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
     } catch (error) {
       console.error("Error creating deployment:", error);
       alert("Failed to create deployment");
+    }
+  };
+
+  const openEditDialog = (deployment: Deployment) => {
+    setEditingDeployment(deployment);
+    setName(deployment.name);
+    setDescription(deployment.description || "");
+    setBuildCommand(deployment.buildCommand || "");
+    setStartCommand(deployment.startCommand);
+    setWorkingDir(deployment.workingDir || "/workspace");
+    setPort(deployment.port.toString());
+    setSubdomain(deployment.subdomain || "");
+    setSelectedDomainId(deployment.domainId || "");
+    setAutoRebuild(deployment.autoRebuild);
+    setShowEditDialog(true);
+  };
+
+  const updateDeployment = async () => {
+    if (!editingDeployment) return;
+
+    try {
+      const res = await fetch(`/api/deployments/${editingDeployment.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          description,
+          buildCommand,
+          startCommand,
+          workingDir,
+          port: parseInt(port),
+          subdomain: subdomain || undefined,
+          domainId: selectedDomainId || undefined,
+          autoRebuild,
+        }),
+      });
+
+      if (res.ok) {
+        await fetchDeployments();
+        setShowEditDialog(false);
+        setEditingDeployment(null);
+        resetForm();
+      } else {
+        const error = await res.json();
+        alert(error.error || "Failed to update deployment");
+      }
+    } catch (error) {
+      console.error("Error updating deployment:", error);
+      alert("Failed to update deployment");
     }
   };
 
@@ -262,7 +325,7 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
     setPort("3000");
     setSubdomain("");
     setAutoRebuild(false);
-    
+
     // Reset to default domain if available
     const defaultDomain = domains.find((d) => d.isDefault);
     setSelectedDomainId(defaultDomain?.id || "");
@@ -450,7 +513,7 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
                     </p>
                   </div>
                 )}
-                
+
                 {/* Subdomain - only show if domain is selected */}
                 {selectedDomainId && (
                   <div>
@@ -466,7 +529,8 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
                     <p className="text-xs text-zinc-500 mt-1">
                       {subdomain
                         ? `Will be: ${subdomain}.${
-                            domains.find((d) => d.id === selectedDomainId)?.domain
+                            domains.find((d) => d.id === selectedDomainId)
+                              ?.domain
                           }`
                         : "Leave empty to auto-generate a random subdomain"}
                     </p>
@@ -586,6 +650,7 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
                       variant="ghost"
                       onClick={() => deployApplication(deployment.id)}
                       className="h-8 w-8 p-0"
+                      title="Deploy"
                     >
                       <Play className="h-4 w-4" />
                     </Button>
@@ -593,8 +658,18 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
                   <Button
                     size="sm"
                     variant="ghost"
+                    onClick={() => openEditDialog(deployment)}
+                    className="h-8 w-8 p-0"
+                    title="Edit deployment"
+                  >
+                    <Edit className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
                     onClick={() => deleteDeployment(deployment.id)}
                     className="h-8 w-8 p-0 text-red-400 hover:text-red-300"
+                    title="Delete deployment"
                   >
                     <Trash2 className="h-4 w-4" />
                   </Button>
@@ -712,6 +787,174 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
           onOpenChange={(open) => !open && setLogsDeployment(null)}
         />
       )}
+
+      {/* Edit Deployment Dialog */}
+      <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+        <DialogContent className="bg-zinc-950 border-zinc-800 text-zinc-100">
+          <DialogHeader>
+            <DialogTitle>Edit Deployment</DialogTitle>
+            <DialogDescription className="text-zinc-400">
+              Update your deployment configuration
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            {editingDeployment?.status === "RUNNING" && (
+              <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 text-yellow-500 mt-0.5 flex-shrink-0" />
+                <div className="text-xs text-yellow-200">
+                  <p className="font-medium mb-1">Deployment is running</p>
+                  <p className="text-yellow-300/80">
+                    Changes will not take effect until you stop and redeploy
+                    this deployment.
+                  </p>
+                </div>
+              </div>
+            )}
+            <div>
+              <label className="text-sm font-medium mb-1 block">Name</label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="my-app"
+                className="bg-zinc-900 border-zinc-800"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-1 block">
+                Description
+              </label>
+              <Input
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Optional description"
+                className="bg-zinc-900 border-zinc-800"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-1 block">
+                Build Command (optional)
+              </label>
+              <Input
+                value={buildCommand}
+                onChange={(e) => setBuildCommand(e.target.value)}
+                placeholder="npm run build"
+                className="bg-zinc-900 border-zinc-800"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-1 block">
+                Start Command
+              </label>
+              <Input
+                value={startCommand}
+                onChange={(e) => setStartCommand(e.target.value)}
+                placeholder="npm start"
+                className="bg-zinc-900 border-zinc-800"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm font-medium mb-1 block">
+                  Working Directory
+                </label>
+                <Input
+                  value={workingDir}
+                  onChange={(e) => setWorkingDir(e.target.value)}
+                  placeholder="/workspace"
+                  className="bg-zinc-900 border-zinc-800"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium mb-1 block">Port</label>
+                <Input
+                  type="number"
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  placeholder="3000"
+                  className="bg-zinc-900 border-zinc-800"
+                />
+              </div>
+            </div>
+            {/* Domain Selection */}
+            {domains.length > 0 && (
+              <div>
+                <label className="text-sm font-medium mb-1 block">Domain</label>
+                <select
+                  value={selectedDomainId}
+                  onChange={(e) => setSelectedDomainId(e.target.value)}
+                  className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-md text-zinc-100 text-sm"
+                >
+                  <option value="">None (use port mapping)</option>
+                  {domains.map((domain) => (
+                    <option key={domain.id} value={domain.id}>
+                      {domain.domain}
+                      {domain.isDefault ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-zinc-500 mt-1">
+                  {selectedDomainId
+                    ? "A subdomain will be auto-generated, or specify one below"
+                    : "Direct port mapping will be used"}
+                </p>
+              </div>
+            )}
+
+            {/* Subdomain - only show if domain is selected */}
+            {selectedDomainId && (
+              <div>
+                <label className="text-sm font-medium mb-1 block">
+                  Subdomain (optional)
+                </label>
+                <Input
+                  value={subdomain}
+                  onChange={(e) => setSubdomain(e.target.value)}
+                  placeholder="Auto-generated if empty"
+                  className="bg-zinc-900 border-zinc-800"
+                />
+                <p className="text-xs text-zinc-500 mt-1">
+                  {subdomain
+                    ? `Will be: ${subdomain}.${
+                        domains.find((d) => d.id === selectedDomainId)?.domain
+                      }`
+                    : "Leave empty to auto-generate a random subdomain"}
+                </p>
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={autoRebuild}
+                onChange={(e) => setAutoRebuild(e.target.checked)}
+                className="rounded border-zinc-700"
+              />
+              <label className="text-sm">
+                Enable auto-rebuild on GitHub push
+              </label>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowEditDialog(false);
+                setEditingDeployment(null);
+                resetForm();
+              }}
+              className="border-zinc-800"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={updateDeployment}
+              disabled={!name || !startCommand || !port}
+              className="bg-emerald-600 hover:bg-emerald-500"
+            >
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -58,8 +58,8 @@ export async function POST(req: NextRequest) {
     // Use requested model or fall back to default
     const selectedModel = model || "anthropic/claude-3.5-sonnet";
 
-    // Create workspace-specific tools
-    const tools = createAgentTools(workspaceId);
+    // Create workspace-specific tools with the same API key and model
+    const tools = createAgentTools(workspaceId, apiKey, selectedModel);
 
     // Collect reasoning tokens
     let reasoningCollected = "";

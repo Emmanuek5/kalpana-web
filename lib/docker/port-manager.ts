@@ -1,27 +1,136 @@
 import { prisma } from "@/lib/db";
 import net from "net";
+import Docker from "dockerode";
 
 export class PortManager {
   private minPort: number;
   private maxPort: number;
+  private docker: Docker;
 
   constructor() {
     this.minPort = parseInt(process.env.CONTAINER_PORT_RANGE_START || "40000");
     this.maxPort = parseInt(process.env.CONTAINER_PORT_RANGE_END || "50000");
+
+    // Initialize Docker client
+    const envHost = process.env.DOCKER_HOST;
+    if (envHost && envHost.length > 0) {
+      if (envHost.startsWith("unix://")) {
+        this.docker = new Docker({
+          socketPath: envHost.replace(/^unix:\/\//, ""),
+        });
+      } else if (envHost.startsWith("npipe://")) {
+        this.docker = new Docker({
+          socketPath: envHost.replace(/^npipe:\/\//, ""),
+        });
+      } else {
+        const normalized = envHost.startsWith("tcp://")
+          ? `http://${envHost.slice("tcp://".length)}`
+          : envHost;
+        try {
+          const url = new URL(normalized);
+          const protocol = url.protocol.replace(":", "") as "http" | "https";
+          const host = url.hostname || "localhost";
+          const port = url.port
+            ? parseInt(url.port, 10)
+            : protocol === "https"
+            ? 2376
+            : 2375;
+          this.docker = new Docker({ protocol, host, port });
+        } catch (_e) {
+          this.docker = this.getDefaultDockerClient();
+        }
+      }
+    } else {
+      this.docker = this.getDefaultDockerClient();
+    }
   }
 
+  private getDefaultDockerClient(): Docker {
+    if (process.platform === "win32") {
+      return new Docker({ socketPath: "//./pipe/docker_engine" });
+    }
+    return new Docker({ socketPath: "/var/run/docker.sock" });
+  }
+
+  /**
+   * Check if any Docker container is using this port
+   */
+  private async isPortUsedByDocker(port: number): Promise<boolean> {
+    try {
+      const containers = await this.docker.listContainers({ all: true });
+
+      for (const container of containers) {
+        if (!container.Ports) continue;
+
+        for (const portBinding of container.Ports) {
+          // Check if this container has a port binding to our host port
+          if (portBinding.PublicPort === port) {
+            console.log(
+              `🔴 Port ${port} is used by Docker container ${
+                container.Names?.[0] || container.Id
+              }`
+            );
+            return true;
+          }
+        }
+      }
+
+      return false;
+    } catch (error) {
+      console.error(`Error checking Docker for port ${port}:`, error);
+      // If we can't check Docker, assume port might be in use to be safe
+      return true;
+    }
+  }
+
+  /**
+   * Test if a port can actually be bound at the OS level AND is not used by Docker
+   * This checks:
+   * 1. Database records
+   * 2. Docker containers (running or stopped)
+   * 3. Actual system-level port binding
+   */
   private async canBind(port: number): Promise<boolean> {
+    // First check if Docker is using this port
+    const dockerUsing = await this.isPortUsedByDocker(port);
+    if (dockerUsing) {
+      return false;
+    }
+
+    // Then check OS-level binding
     return new Promise((resolve) => {
       const server = net.createServer();
-      server.once("error", () => {
+
+      // Set a timeout in case the check hangs
+      const timeout = setTimeout(() => {
+        server.close();
+        resolve(false);
+      }, 1000);
+
+      server.once("error", (err: any) => {
+        clearTimeout(timeout);
+        // Port is in use if we get EADDRINUSE
+        if (err.code === "EADDRINUSE") {
+          console.log(`🔴 Port ${port} is already in use (OS level)`);
+        }
         resolve(false);
       });
+
       server.once("listening", () => {
-        server.close(() => resolve(true));
+        clearTimeout(timeout);
+        server.close(() => {
+          console.log(
+            `🟢 Port ${port} is available (DB + Docker + OS verified)`
+          );
+          resolve(true);
+        });
       });
+
       try {
+        // Bind to all interfaces to ensure the port is truly available
         server.listen(port, "0.0.0.0");
       } catch (_e) {
+        clearTimeout(timeout);
         resolve(false);
       }
     });
@@ -67,23 +176,49 @@ export class PortManager {
 
   /**
    * Allocate two consecutive ports for a workspace (VSCode + Agent)
+   * Checks BOTH database AND actual OS-level port availability
+   * Automatically tries the next port if one is taken
    */
   async allocatePorts(): Promise<{ vscodePort: number; agentPort: number }> {
+    console.log(
+      `🔍 Searching for available ports in range ${this.minPort}-${this.maxPort}...`
+    );
     const usedPorts = await this.getUsedPortsFromDb();
+    console.log(`📊 Found ${usedPorts.size} ports in use from database`);
 
-    // Find two consecutive available ports
+    // Find two consecutive available ports - checking BOTH DB and OS level
     for (let port = this.minPort; port < this.maxPort - 1; port++) {
-      if (usedPorts.has(port) || usedPorts.has(port + 1)) continue;
-      // Probe OS-level availability as well
+      // Check 1: Skip if either port is allocated in our database
+      if (usedPorts.has(port) || usedPorts.has(port + 1)) {
+        continue; // Skip silently to reduce log spam
+      }
+
+      // Check 2: Test actual OS-level availability
+      // This is critical - checks if ports are ACTUALLY free on the system
       // eslint-disable-next-line no-await-in-loop
-      const p1 = await this.canBind(port);
+      const p1Available = await this.canBind(port);
+      if (!p1Available) {
+        continue; // Port in use by another process, try next
+      }
+
       // eslint-disable-next-line no-await-in-loop
-      const p2 = await this.canBind(port + 1);
-      if (!p1 || !p2) continue;
+      const p2Available = await this.canBind(port + 1);
+      if (!p2Available) {
+        continue; // Second port in use by another process, try next
+      }
+
+      // Both ports passed DB check AND OS-level binding test!
+      console.log(
+        `✅ Successfully allocated ports: ${port} (VSCode) and ${
+          port + 1
+        } (Agent) - verified available in DB and OS`
+      );
       return { vscodePort: port, agentPort: port + 1 };
     }
 
-    throw new Error("No available ports in range");
+    throw new Error(
+      `❌ No available consecutive ports in range ${this.minPort}-${this.maxPort}. All port pairs are in use (checked both database and OS-level system ports).`
+    );
   }
 
   /**
@@ -138,30 +273,38 @@ export class PortManager {
 
   /**
    * Allocate a single port (for agent containers)
-   * This method checks both the database AND the actual OS-level port availability
+   * Checks BOTH database AND actual OS-level port availability
+   * Automatically tries the next port if one is taken
    */
   async allocateAgentPort(): Promise<number> {
+    console.log(
+      `🔍 Searching for available agent port in range ${this.minPort}-${this.maxPort}...`
+    );
     const usedPorts = await this.getUsedPortsFromDb();
+    console.log(`📊 Found ${usedPorts.size} ports in use from database`);
 
-    // Check all ports in range for actual availability
+    // Check all ports in range - checking BOTH DB and OS level
     for (let port = this.minPort; port <= this.maxPort; port++) {
-      // Skip if already in DB
+      // Check 1: Skip if already allocated in our database
       if (usedPorts.has(port)) continue;
 
-      // Test actual OS-level availability (this is the critical check)
+      // Check 2: Test actual OS-level availability
+      // This is critical - checks if port is ACTUALLY free on the system
       // eslint-disable-next-line no-await-in-loop
-      const canUsePort = await this.canBind(port);
-      if (!canUsePort) {
-        console.log(`⚠️ Port ${port} is in use at OS level, trying next...`);
-        continue;
+      const isAvailableOnOS = await this.canBind(port);
+      if (!isAvailableOnOS) {
+        continue; // Port in use by another process, try next
       }
 
-      console.log(`✅ Allocated available port: ${port}`);
+      // Port passed both DB check AND OS-level binding test!
+      console.log(
+        `✅ Successfully allocated port: ${port} - verified available in DB and OS`
+      );
       return port;
     }
 
     throw new Error(
-      `No available agent ports in range ${this.minPort}-${this.maxPort}. All ports are in use.`
+      `❌ No available agent ports in range ${this.minPort}-${this.maxPort}. All ports are in use (checked both database and OS-level system ports).`
     );
   }
 
@@ -189,5 +332,43 @@ export class PortManager {
     }
 
     throw new Error("No alternative ports available");
+  }
+
+  /**
+   * Find alternative consecutive ports if the initially allocated ones fail to bind
+   * This is used as a fallback when Docker fails to bind workspace ports
+   */
+  async findAlternativePorts(
+    failedVscodePort: number,
+    failedAgentPort: number
+  ): Promise<{ vscodePort: number; agentPort: number }> {
+    console.log(
+      `🔄 Ports ${failedVscodePort} and ${failedAgentPort} failed to bind, finding alternatives...`
+    );
+
+    // Get fresh list of used ports
+    const usedPorts = await this.getUsedPortsFromDb();
+    usedPorts.add(failedVscodePort);
+    usedPorts.add(failedAgentPort);
+
+    // Find new consecutive ports
+    for (let port = this.minPort; port < this.maxPort - 1; port++) {
+      if (usedPorts.has(port) || usedPorts.has(port + 1)) continue;
+
+      // Test OS-level availability
+      // eslint-disable-next-line no-await-in-loop
+      const p1 = await this.canBind(port);
+      // eslint-disable-next-line no-await-in-loop
+      const p2 = await this.canBind(port + 1);
+
+      if (!p1 || !p2) continue;
+
+      console.log(
+        `✅ Found alternative consecutive ports: ${port} and ${port + 1}`
+      );
+      return { vscodePort: port, agentPort: port + 1 };
+    }
+
+    throw new Error("No alternative consecutive ports available");
   }
 }

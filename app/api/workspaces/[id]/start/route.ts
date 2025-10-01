@@ -2,6 +2,104 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { dockerManager } from "@/lib/docker/manager";
 import { NextRequest } from "next/server";
+import Docker from "dockerode";
+
+// Background monitoring function that runs independently of client connection
+async function monitorWorkspaceStartup(
+  workspaceId: string,
+  containerId: string
+): Promise<void> {
+  console.log(`🔍 Starting background monitor for workspace ${workspaceId}`);
+
+  const docker = dockerManager["docker"] as Docker;
+  const container = docker.getContainer(containerId);
+
+  let agentReady = false;
+  let codeServerReady = false;
+  let checksPerformed = 0;
+  const maxChecks = 45; // 90 seconds
+
+  // Monitor container logs for readiness signals
+  const logMonitor = setInterval(async () => {
+    try {
+      const logs = await container.logs({
+        stdout: true,
+        stderr: true,
+        tail: 50,
+      });
+
+      const logText = logs.toString();
+
+      if (
+        !agentReady &&
+        (logText.includes("Agent bridge started") ||
+          logText.includes("agent bridge started"))
+      ) {
+        agentReady = true;
+        console.log(`✅ Workspace ${workspaceId}: Agent bridge ready`);
+      }
+
+      if (!codeServerReady && logText.includes("HTTP server listening")) {
+        codeServerReady = true;
+        console.log(`✅ Workspace ${workspaceId}: Code-server ready`);
+      }
+    } catch (error) {
+      console.error(`Error reading logs for workspace ${workspaceId}:`, error);
+    }
+  }, 2000);
+
+  // Check container status and readiness
+  const statusCheck = setInterval(async () => {
+    try {
+      checksPerformed++;
+      const info = await container.inspect();
+
+      console.log(
+        `[${workspaceId}] Check #${checksPerformed}: Running=${info.State.Running}, Agent=${agentReady}, CodeServer=${codeServerReady}`
+      );
+
+      // Ready if both are ready, OR if code-server is ready and we've waited 30+ seconds
+      const isReady = info.State.Running && agentReady && codeServerReady;
+      const failsafeReady =
+        info.State.Running && codeServerReady && checksPerformed > 15;
+
+      if (isReady || failsafeReady) {
+        clearInterval(logMonitor);
+        clearInterval(statusCheck);
+
+        if (failsafeReady && !agentReady) {
+          console.log(
+            `⚠️ Workspace ${workspaceId}: Using failsafe (code-server ready, agent bridge not detected)`
+          );
+        }
+
+        // Mark workspace as RUNNING
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: { status: "RUNNING" },
+        });
+
+        console.log(`✅ Workspace ${workspaceId} is now RUNNING`);
+        return;
+      }
+
+      // Timeout after max checks
+      if (checksPerformed >= maxChecks) {
+        clearInterval(logMonitor);
+        clearInterval(statusCheck);
+
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: { status: "ERROR" },
+        });
+
+        console.error(`❌ Workspace ${workspaceId} startup timeout`);
+      }
+    } catch (error) {
+      console.error(`Error checking workspace ${workspaceId}:`, error);
+    }
+  }, 2000);
+}
 
 export async function POST(
   req: NextRequest,
@@ -42,7 +140,23 @@ export async function POST(
       },
     });
 
-    // Create a readable stream to send logs
+    // Start the workspace container
+    const container = await dockerManager.createWorkspace(workspace.id, {
+      githubRepo: workspace.githubRepo || undefined,
+      githubToken: githubAccount?.accessToken || undefined,
+      nixConfig: workspace.nixConfig || undefined,
+      template: workspace.template || undefined,
+      preset: workspace.preset || "default",
+      gitUserName: session.user.name || undefined,
+      gitUserEmail: session.user.email || undefined,
+    });
+
+    // Start background monitoring (runs independently of this request)
+    monitorWorkspaceStartup(id, container.containerId).catch((error) => {
+      console.error(`Background monitoring failed for workspace ${id}:`, error);
+    });
+
+    // Create a readable stream to send logs to the client
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
@@ -53,38 +167,16 @@ export async function POST(
               `data: ${JSON.stringify({
                 type: "status",
                 stage: "starting",
-                message: "Creating container...",
-              })}\n\n`
-            )
-          );
-
-          // Start the workspace container
-          const container = await dockerManager.createWorkspace(workspace.id, {
-            githubRepo: workspace.githubRepo || undefined,
-            githubToken: githubAccount?.accessToken || undefined,
-            nixConfig: workspace.nixConfig || undefined,
-            template: workspace.template || undefined,
-            preset: workspace.preset || "default",
-            gitUserName: session.user.name || undefined,
-            gitUserEmail: session.user.email || undefined,
-          });
-
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: "status",
-                stage: "logs",
-                message: "Streaming startup logs...",
+                message: "Container created, monitoring startup...",
               })}\n\n`
             )
           );
 
           // Get the container
-          const dockerContainer = await dockerManager["docker"].getContainer(
-            container.containerId
-          );
+          const docker = dockerManager["docker"] as Docker;
+          const dockerContainer = docker.getContainer(container.containerId);
 
-          // Stream logs
+          // Stream logs to the client
           const logStream = await dockerContainer.logs({
             follow: true,
             stdout: true,
@@ -93,11 +185,7 @@ export async function POST(
             timestamps: false,
           });
 
-          let checkInterval: NodeJS.Timeout;
-          let agentReady = false;
-          let codeServerReady = false;
-
-          // Process log stream
+          // Process log stream for client display
           logStream.on("data", (chunk: Buffer) => {
             const log = chunk
               .toString("utf-8")
@@ -105,38 +193,42 @@ export async function POST(
             const lines = log.split("\n").filter((l) => l.trim());
 
             for (const line of lines) {
-              // Send log line
-              controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify({ type: "log", message: line })}\n\n`
-                )
-              );
-
-              // Check for readiness markers (require BOTH agent and code-server)
-              if (line.includes("Agent bridge started")) {
-                agentReady = true;
-              }
-              if (line.includes("HTTP server listening")) {
-                codeServerReady = true;
+              try {
+                // Send log line to client
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "log",
+                      message: line,
+                    })}\n\n`
+                  )
+                );
+              } catch (e) {
+                // Client disconnected, that's fine
               }
             }
           });
 
-          // Check if container is ready
-          checkInterval = setInterval(async () => {
+          logStream.on("end", () => {
             try {
-              const info = await dockerContainer.inspect();
-              if (info.State.Running && agentReady && codeServerReady) {
-                clearInterval(checkInterval);
+              controller.close();
+            } catch (e) {
+              // Already closed
+            }
+          });
+
+          // Poll database for status updates from background monitor
+          const statusCheckInterval = setInterval(async () => {
+            try {
+              const ws = await prisma.workspace.findUnique({
+                where: { id },
+                select: { status: true },
+              });
+
+              if (ws?.status === "RUNNING") {
+                clearInterval(statusCheckInterval);
                 (logStream as any).destroy?.();
 
-                // Mark workspace RUNNING only now that both subsystems are ready
-                await prisma.workspace.update({
-                  where: { id },
-                  data: { status: "RUNNING" },
-                });
-
-                // Send completion
                 controller.enqueue(
                   encoder.encode(
                     `data: ${JSON.stringify({
@@ -145,39 +237,55 @@ export async function POST(
                     })}\n\n`
                   )
                 );
+                controller.close();
+              } else if (ws?.status === "ERROR") {
+                clearInterval(statusCheckInterval);
+                (logStream as any).destroy?.();
 
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "error",
+                      message: "Workspace failed to start",
+                    })}\n\n`
+                  )
+                );
                 controller.close();
               }
-            } catch (error) {
-              console.error("Error checking container:", error);
+            } catch (e) {
+              // Ignore errors, background monitor will handle it
             }
           }, 2000);
 
-          // Timeout after 90 seconds (starting takes longer than rebuild)
+          // Client timeout - stop streaming but background continues
           setTimeout(() => {
-            clearInterval(checkInterval);
+            clearInterval(statusCheckInterval);
             (logStream as any).destroy?.();
+            try {
+              controller.close();
+            } catch (e) {
+              // Already closed
+            }
+          }, 90000);
+        } catch (error: any) {
+          console.error("Stream error:", error);
+          try {
             controller.enqueue(
               encoder.encode(
                 `data: ${JSON.stringify({
                   type: "error",
-                  message: "Startup timeout (agent or code-server not ready)",
+                  message: error.message,
                 })}\n\n`
               )
             );
+          } catch (e) {
+            // Client disconnected
+          }
+          try {
             controller.close();
-          }, 90000);
-        } catch (error: any) {
-          console.error("Startup error:", error);
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: "error",
-                message: error.message,
-              })}\n\n`
-            )
-          );
-          controller.close();
+          } catch (e) {
+            // Already closed
+          }
         }
       },
     });
