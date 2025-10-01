@@ -281,12 +281,12 @@ export default function AgentDetailPage() {
   }
 
   return (
-    <div className="flex h-screen bg-zinc-950 overflow-hidden">
+    <div className="flex h-screen bg-black overflow-hidden">
       <Sidebar />
 
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="border-b border-zinc-800/50 px-6 py-4 bg-zinc-950/50 backdrop-blur-sm">
+        <div className="border-b border-zinc-900 px-6 py-4 bg-black">
           <div className="flex items-center gap-4">
             <Button
               size="sm"

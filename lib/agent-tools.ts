@@ -665,5 +665,197 @@ export function createAgentTools(workspaceId: string) {
         }
       },
     }),
+
+    searchWeb: tool({
+      description:
+        "Search the web using a search engine. Returns relevant search results with titles, URLs, and snippets. Perfect for finding documentation, tutorials, or researching solutions.",
+      inputSchema: z.object({
+        query: z
+          .string()
+          .describe("The search query (e.g., 'Next.js 15 app router best practices')"),
+        maxResults: z
+          .number()
+          .optional()
+          .describe("Maximum number of results to return (default: 10)"),
+      }),
+      execute: async ({ query, maxResults = 10 }) => {
+        try {
+          // Use DuckDuckGo or other search API
+          const response = await fetch(
+            `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1`
+          );
+          const data = await response.json();
+
+          const results = [
+            ...(data.RelatedTopics || [])
+              .filter((topic: any) => topic.FirstURL)
+              .slice(0, maxResults)
+              .map((topic: any) => ({
+                title: topic.Text?.split(" - ")[0] || "Result",
+                url: topic.FirstURL,
+                snippet: topic.Text || "",
+              })),
+          ];
+
+          return {
+            success: true,
+            query,
+            results,
+            count: results.length,
+            message: `Found ${results.length} results for "${query}"`,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+            query,
+            results: [],
+          };
+        }
+      },
+    }),
+
+    scrapeWebPage: tool({
+      description:
+        "Scrape and extract content from a web page. Returns the main text content, links, and metadata. Use this to analyze documentation, blog posts, or any web content.",
+      inputSchema: z.object({
+        url: z.string().describe("The URL to scrape"),
+        selector: z
+          .string()
+          .optional()
+          .describe("CSS selector to extract specific content (optional)"),
+        extractLinks: z
+          .boolean()
+          .optional()
+          .describe("Whether to extract all links from the page (default: false)"),
+      }),
+      execute: async ({ url, selector, extractLinks = false }) => {
+        try {
+          const response = await fetch(url);
+          const html = await response.text();
+
+          // Basic HTML parsing (in production, use cheerio or similar)
+          let content = html
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+            .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 5000); // Limit content length
+
+          const links: string[] = [];
+          if (extractLinks) {
+            const linkMatches = html.matchAll(/href=["']([^"']+)["']/g);
+            for (const match of linkMatches) {
+              const link = match[1];
+              if (link.startsWith("http")) {
+                links.push(link);
+              }
+            }
+          }
+
+          // Extract title
+          const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+          const title = titleMatch ? titleMatch[1] : "Untitled";
+
+          return {
+            success: true,
+            url,
+            title,
+            content,
+            links: extractLinks ? links.slice(0, 50) : [],
+            message: `Successfully scraped ${url}`,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+            url,
+          };
+        }
+      },
+    }),
+
+    fetchJSON: tool({
+      description:
+        "Fetch JSON data from an API endpoint. Perfect for interacting with REST APIs to get data, check API responses, or integrate external services.",
+      inputSchema: z.object({
+        url: z.string().describe("The API URL to fetch from"),
+        method: z
+          .enum(["GET", "POST", "PUT", "DELETE"])
+          .optional()
+          .describe("HTTP method (default: GET)"),
+        headers: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe("Optional HTTP headers"),
+        body: z
+          .any()
+          .optional()
+          .describe("Request body for POST/PUT (will be JSON stringified)"),
+      }),
+      execute: async ({ url, method = "GET", headers, body }) => {
+        try {
+          const response = await fetch(url, {
+            method,
+            headers: {
+              "Content-Type": "application/json",
+              ...headers,
+            },
+            body: body ? JSON.stringify(body) : undefined,
+          });
+
+          const data = await response.json();
+
+          return {
+            success: true,
+            status: response.status,
+            data,
+            url,
+            message: `${method} request to ${url} successful`,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+            url,
+          };
+        }
+      },
+    }),
+
+    downloadFile: tool({
+      description:
+        "Download a file from a URL and save it to the workspace. Useful for downloading libraries, assets, or example files.",
+      inputSchema: z.object({
+        url: z.string().describe("The URL to download from"),
+        destination: z
+          .string()
+          .describe("Where to save the file in the workspace"),
+      }),
+      execute: async ({ url, destination }) => {
+        try {
+          const response = await fetch(url);
+          const content = await response.text();
+
+          await containerAPI.writeFile(workspaceId, destination, content);
+
+          return {
+            success: true,
+            url,
+            destination,
+            size: content.length,
+            message: `Downloaded ${url} to ${destination}`,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+            url,
+            destination,
+          };
+        }
+      },
+    }),
   };
 }

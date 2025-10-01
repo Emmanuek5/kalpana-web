@@ -201,52 +201,47 @@ export default function AgentsPage() {
 
   const statusConfig = {
     IDLE: {
-      color: "bg-zinc-800/80 text-zinc-400 border-zinc-700/50",
+      color: "bg-black/40 text-zinc-500 border-zinc-800",
       icon: null,
     },
     CLONING: {
-      color: "bg-blue-500/20 text-blue-300 border-blue-500/30",
+      color: "bg-black/40 text-zinc-400 border-zinc-700",
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
     },
     RUNNING: {
-      color: "bg-amber-500/20 text-amber-300 border-amber-500/30",
+      color: "bg-black/40 text-emerald-400 border-emerald-500/50",
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
     },
     COMPLETED: {
-      color: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
+      color: "bg-black/40 text-emerald-400 border-emerald-500/50",
       icon: <CheckCircle2 className="h-3 w-3" />,
     },
     ERROR: {
-      color: "bg-red-500/20 text-red-300 border-red-500/30",
+      color: "bg-black/40 text-red-400 border-red-500/50",
       icon: <XCircle className="h-3 w-3" />,
     },
     PUSHING: {
-      color: "bg-purple-500/20 text-purple-300 border-purple-500/30",
+      color: "bg-black/40 text-zinc-400 border-zinc-700",
       icon: <Upload className="h-3 w-3 animate-pulse" />,
     },
   };
 
   return (
-    <div className="flex h-screen bg-zinc-950 overflow-hidden relative">
-      <div className="fixed inset-0 bg-[linear-gradient(to_right,#18181b_1px,transparent_1px),linear-gradient(to_bottom,#18181b_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_0%,#000_70%,transparent_110%)] pointer-events-none" />
-
+    <div className="flex h-screen bg-black overflow-hidden">
       <Sidebar />
 
-      <div className="flex-1 flex flex-col overflow-hidden relative z-10">
-        <div className="border-b border-zinc-800/50 flex items-center justify-between px-6 py-4 bg-zinc-950/50 backdrop-blur-sm">
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="border-b border-zinc-900 flex items-center justify-between px-6 py-4 bg-black">
           <div className="flex items-center gap-3">
             <Bot className="h-5 w-5 text-emerald-400" />
-            <h1 className="text-lg font-medium text-zinc-100">Agents</h1>
-            <Badge
-              variant="outline"
-              className="bg-zinc-900/50 border-zinc-800 text-zinc-400 text-xs"
-            >
+            <h1 className="text-lg font-light tracking-wider text-zinc-100">AGENTS</h1>
+            <div className="px-2 py-0.5 bg-black border border-zinc-800 text-zinc-500 text-xs font-mono">
               {agents.length}
-            </Badge>
+            </div>
           </div>
           <Button
             size="sm"
-            className="bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20"
+            className="bg-black border border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/10 transition-colors"
             onClick={handleOpenCreate}
           >
             <Plus className="h-4 w-4 mr-2" />
@@ -261,18 +256,18 @@ export default function AgentsPage() {
                 <Loader2 className="h-12 w-12 text-emerald-400 animate-spin" />
               </div>
             ) : agents.length === 0 ? (
-              <Card className="p-20 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 text-center backdrop-blur-xl">
+              <Card className="p-20 bg-black border border-zinc-900 text-center">
                 <div className="max-w-md mx-auto">
-                  <Bot className="h-16 w-16 text-zinc-600 mx-auto mb-6" />
-                  <h3 className="text-2xl font-bold mb-3 text-zinc-100">
+                  <Bot className="h-16 w-16 text-zinc-800 mx-auto mb-6" />
+                  <h3 className="text-2xl font-light tracking-wide mb-3 text-zinc-100">
                     No agents yet
                   </h3>
-                  <p className="text-zinc-500 mb-10">
+                  <p className="text-zinc-600 mb-10 font-light">
                     Create your first agent to automate code editing tasks on
                     your GitHub repositories.
                   </p>
                   <Button
-                    className="bg-gradient-to-r from-emerald-600 to-emerald-500 text-white"
+                    className="bg-black border border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/10"
                     onClick={handleOpenCreate}
                   >
                     <Plus className="h-5 w-5 mr-2" />
@@ -285,17 +280,17 @@ export default function AgentsPage() {
                 {agents.map((agent) => (
                   <Card
                     key={agent.id}
-                    className="p-6 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 hover:border-zinc-700/80 transition-all backdrop-blur-xl relative overflow-hidden hover:scale-[1.02]"
+                    className="p-6 bg-black border border-zinc-900 hover:border-emerald-500/30 transition-colors"
                   >
                     <div className="flex items-start justify-between mb-4">
                       <div className="flex-1 min-w-0 mr-3">
                         <div className="flex items-center gap-2 mb-2">
                           <Bot className="h-4 w-4 text-emerald-400" />
-                          <h3 className="text-lg font-semibold text-zinc-100 truncate">
+                          <h3 className="text-base font-light tracking-wide text-zinc-100 truncate">
                             {agent.name}
                           </h3>
                         </div>
-                        <p className="text-sm text-zinc-400 line-clamp-2">
+                        <p className="text-sm text-zinc-500 line-clamp-2 font-light">
                           {agent.task}
                         </p>
                       </div>
@@ -311,29 +306,29 @@ export default function AgentsPage() {
                     </div>
 
                     <div className="space-y-3 mb-4">
-                      <div className="flex items-center gap-2 text-sm text-zinc-400 px-3 py-2 rounded-lg bg-zinc-900/80 border border-zinc-800/80">
+                      <div className="flex items-center gap-2 text-sm text-zinc-500 px-3 py-2 bg-black border border-zinc-900">
                         <Github className="h-4 w-4 shrink-0" />
                         <span className="truncate font-mono text-xs">
                           {agent.githubRepo}
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 text-sm text-zinc-400">
+                      <div className="flex items-center gap-2 text-sm text-zinc-600">
                         <GitBranch className="h-4 w-4" />
-                        <span className="text-xs">
+                        <span className="text-xs font-mono">
                           {agent.sourceBranch} → {agent.targetBranch}
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 text-xs text-zinc-600">
+                      <div className="flex items-center gap-2 text-xs text-zinc-700">
                         <Clock className="h-4 w-4" />
-                        <span>
+                        <span className="font-mono">
                           {new Date(agent.createdAt).toLocaleDateString()}
                         </span>
                       </div>
                     </div>
 
                     {agent.errorMessage && (
-                      <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
-                        <p className="text-xs text-red-400">
+                      <div className="mb-4 p-3 bg-black border border-red-500/50">
+                        <p className="text-xs text-red-400 font-mono">
                           {agent.errorMessage}
                         </p>
                       </div>
@@ -343,7 +338,7 @@ export default function AgentsPage() {
                       {agent.status === "IDLE" && (
                         <Button
                           size="sm"
-                          className="flex-1 bg-emerald-600 text-white hover:bg-emerald-500"
+                          className="flex-1 bg-black border border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/10"
                           onClick={() => handleStartAgent(agent)}
                         >
                           <Play className="h-4 w-4 mr-2" />
@@ -354,7 +349,7 @@ export default function AgentsPage() {
                         agent.status === "COMPLETED") && (
                         <Button
                           size="sm"
-                          className="flex-1"
+                          className="flex-1 bg-black border border-zinc-800 text-zinc-400 hover:border-emerald-500/30 hover:text-emerald-400"
                           onClick={() =>
                             router.push(`/dashboard/agents/${agent.id}`)
                           }
@@ -365,7 +360,7 @@ export default function AgentsPage() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="border-zinc-800/80 bg-zinc-900/80 hover:bg-red-500/20 hover:border-red-500/40 text-zinc-500 hover:text-red-400"
+                        className="border-zinc-900 bg-black hover:border-red-500/50 text-zinc-600 hover:text-red-400"
                         onClick={() => handleOpenDelete(agent)}
                       >
                         <Trash2 className="h-4 w-4" />
@@ -381,7 +376,7 @@ export default function AgentsPage() {
 
       {/* Create Agent Modal */}
       <Dialog open={createModalOpen} onOpenChange={setCreateModalOpen}>
-        <DialogContent className="bg-zinc-900 border-zinc-800 max-w-2xl">
+        <DialogContent className="bg-black border border-zinc-900 max-w-2xl">
           <DialogHeader>
             <DialogTitle className="text-xl font-semibold text-zinc-100">
               Create New Agent
