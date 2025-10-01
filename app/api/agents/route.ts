@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { name, task, githubRepo, sourceBranch, targetBranch } =
+    const { name, task, model, githubRepo, sourceBranch, targetBranch } =
       await req.json();
 
     if (!name || !task || !githubRepo || !targetBranch) {
@@ -65,6 +65,7 @@ export async function POST(req: NextRequest) {
       data: {
         name,
         task,
+        model: model || "anthropic/claude-3.5-sonnet",
         githubRepo,
         sourceBranch: sourceBranch || "main",
         targetBranch,

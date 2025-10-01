@@ -211,7 +211,13 @@ export default function WorkspacePage({
     return () => clearInterval(interval);
   }, [resolvedParams.id]);
 
-  // Poll for startup logs when starting
+  // Keep `starting` state in sync with backend status so logs resume after navigation
+  useEffect(() => {
+    if (!workspace) return;
+    setStarting(workspace.status === "STARTING");
+  }, [workspace?.status]);
+
+  // Poll for startup logs when starting; feed them into rebuild UI state
   useEffect(() => {
     if (workspace?.status === "STARTING") {
       const interval = setInterval(async () => {
@@ -220,6 +226,17 @@ export default function WorkspacePage({
           if (res.ok) {
             const data = await res.json();
             setStartupLogs(data.status);
+            // Mirror into rebuild UI state so the panel shows logs when returning to the page
+            if (data?.status?.message) {
+              setRebuildStage(data.status.message);
+            }
+            if (typeof data?.logs === "string") {
+              const lines = data.logs
+                .split("\n")
+                .map((l: string) => l.trim())
+                .filter((l: string) => l.length > 0);
+              setRebuildLogs(lines.slice(-500));
+            }
           }
         } catch (error) {
           console.error("Error fetching logs:", error);
@@ -230,6 +247,12 @@ export default function WorkspacePage({
     } else if (workspace?.status === "RUNNING") {
       // Clear startup logs after a delay
       setTimeout(() => setStartupLogs(null), 2000);
+      // Also clear rebuild UI after a brief delay
+      setTimeout(() => {
+        setRebuildLogs([]);
+        setRebuildStage("");
+        setStarting(false);
+      }, 2000);
     }
   }, [workspace?.status, resolvedParams.id]);
 

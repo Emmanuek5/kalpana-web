@@ -23,9 +23,7 @@ export async function POST(
   const deployment = await prisma.deployment.findFirst({
     where: {
       id: deploymentId,
-      workspace: {
-        userId: session.user.id,
-      },
+      userId: session.user.id, // Direct ownership check
     },
   });
 
@@ -48,10 +46,24 @@ export async function POST(
       try {
         sendEvent("status", { message: "Starting deployment..." });
 
+        // Track if we've sent the buildId
+        let buildIdSent = false;
+
         await deploymentManager.deployApplication(
           deploymentId,
           "manual",
-          (log) => {
+          async (log) => {
+            // Send the build ID on the first log message
+            if (!buildIdSent) {
+              const latestBuild = await prisma.build.findFirst({
+                where: { deploymentId, status: "BUILDING" },
+                orderBy: { createdAt: "desc" },
+              });
+              if (latestBuild) {
+                sendEvent("buildId", { buildId: latestBuild.id });
+                buildIdSent = true;
+              }
+            }
             sendEvent("log", { message: log });
           }
         );

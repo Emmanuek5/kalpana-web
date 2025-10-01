@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
+import { agentRunner } from "@/lib/agents/agent-runner";
 
 // GET single agent
 export async function GET(
@@ -60,11 +61,15 @@ export async function DELETE(
       return NextResponse.json({ error: "Agent not found" }, { status: 404 });
     }
 
-    // TODO: Stop and cleanup container if running
-    if (agent.containerId) {
-      // Will implement container cleanup
+    // Stop and cleanup container BEFORE deleting from database
+    try {
+      await agentRunner.stopAgent(id);
+    } catch (error) {
+      console.error("Error stopping agent container:", error);
+      // Continue with deletion even if container cleanup fails
     }
 
+    // Now delete from database
     await prisma.agent.delete({
       where: { id },
     });

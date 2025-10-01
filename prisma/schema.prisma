@@ -30,6 +30,7 @@ model User {
   presets             Preset[]
   domains             Domain[]
   agents              Agent[]
+  deployments         Deployment[]
   
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
@@ -231,6 +232,11 @@ model Deployment {
   name            String
   description     String?
   
+  // GitHub repository (for standalone deployments)
+  githubRepo      String?           // e.g., "owner/repo"
+  githubBranch    String?           @default("main")
+  rootDirectory   String?           // Root directory in repo (for monorepos)
+  
   // Container metadata
   containerId     String?
   port            Int?              // Application port inside container
@@ -240,8 +246,10 @@ model Deployment {
   // Build configuration
   buildCommand    String?           // e.g., "npm run build"
   startCommand    String            // e.g., "npm start"
+  installCommand  String?           // e.g., "npm install" or "yarn install"
   workingDir      String?           // Directory to run commands in
   envVars         String?           // JSON stringified environment variables
+  framework       String?           // Framework detection: nextjs, vite, etc.
   
   // Network configuration
   subdomain       String?           // Subdomain for this deployment
@@ -253,9 +261,13 @@ model Deployment {
   autoRebuild     Boolean           @default(false)
   webhookSecret   String?           // GitHub webhook secret
   
-  // Workspace relation
-  workspaceId     String            @db.ObjectId
-  workspace       Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // User relation (for standalone deployments)
+  userId          String            @db.ObjectId
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Workspace relation (OPTIONAL - for workspace-based deployments)
+  workspaceId     String?           @db.ObjectId
+  workspace       Workspace?        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   
   // Relations
   builds          Build[]
@@ -265,10 +277,12 @@ model Deployment {
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
   
+  @@index([userId])
   @@index([workspaceId])
   @@index([status])
   @@index([subdomain])
   @@index([domainId])
+  @@index([githubRepo])
 }
 
 enum AgentStatus {
@@ -294,6 +308,9 @@ model Agent {
   containerId     String?
   agentPort       Int?
   status          AgentStatus   @default(IDLE)
+  
+  // AI Configuration
+  model           String        @default("anthropic/claude-3.5-sonnet") // OpenRouter model to use
   
   // Execution data
   toolCalls       String?       // JSON array of tool calls/messages

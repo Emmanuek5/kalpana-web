@@ -171,7 +171,11 @@ export class DockerManager {
     }
   ): Promise<WorkspaceContainer> {
     // Allocate ports
-    const { vscodePort, agentPort } = await this.portManager.allocatePorts();
+    let vscodePort: number;
+    let agentPort: number;
+    const portResult = await this.portManager.allocatePorts();
+    vscodePort = portResult.vscodePort;
+    agentPort = portResult.agentPort;
 
     // Check if preset is a custom user preset (MongoDB ObjectId format)
     let presetSettings = "";
@@ -200,119 +204,179 @@ export class DockerManager {
       },
     });
 
-    try {
-      // Ensure base image exists; build once if missing
-      const imageName = "kalpana/workspace:latest";
-      await this.ensureImage(imageName);
+    let retries = 0;
+    const maxRetries = 3;
 
-      // Create or get persistent volume for workspace
-      const volumeName = `kalpana-workspace-${workspaceId}`;
+    while (retries < maxRetries) {
       try {
-        await this.docker.getVolume(volumeName).inspect();
-      } catch (error) {
-        // Volume doesn't exist, create it
-        await this.docker.createVolume({
-          Name: volumeName,
+        // Ensure base image exists; build once if missing
+        const imageName = "kalpana/workspace:latest";
+        await this.ensureImage(imageName);
+
+        // Create or get persistent volume for workspace
+        const volumeName = `kalpana-workspace-${workspaceId}`;
+        try {
+          await this.docker.getVolume(volumeName).inspect();
+        } catch (error) {
+          // Volume doesn't exist, create it
+          await this.docker.createVolume({
+            Name: volumeName,
+            Labels: {
+              "kalpana.workspace.id": workspaceId,
+              "kalpana.managed": "true",
+            },
+          });
+          console.log(`Created persistent volume: ${volumeName}`);
+        }
+
+        // Remove any existing container with the same name
+        const containerName = `workspace-${workspaceId}`;
+        await this.removeExistingContainer(containerName);
+
+        // Create container with persistent volume
+        const container = await this.docker.createContainer({
+          Image: imageName,
+          name: containerName,
+          Env: [
+            `WORKSPACE_ID=${workspaceId}`,
+            `GITHUB_REPO=${config.githubRepo || ""}`,
+            `GITHUB_TOKEN=${config.githubToken || ""}`,
+            `NIX_CONFIG=${config.nixConfig || ""}`,
+            `TEMPLATE=${config.template || ""}`,
+            `PRESET=${config.preset || "default"}`,
+            `GIT_USER_NAME=${config.gitUserName || ""}`,
+            `GIT_USER_EMAIL=${config.gitUserEmail || ""}`,
+            `CUSTOM_PRESET_SETTINGS=${presetSettings}`,
+            `CUSTOM_PRESET_EXTENSIONS=${presetExtensions}`,
+          ],
+          ExposedPorts: {
+            "8080/tcp": {}, // code-server
+            "3001/tcp": {}, // agent bridge
+          },
+          HostConfig: {
+            PortBindings: {
+              "8080/tcp": [{ HostPort: vscodePort.toString() }],
+              "3001/tcp": [{ HostPort: agentPort.toString() }],
+            },
+            Binds: [
+              `${volumeName}:/workspace`, // Mount persistent volume
+            ],
+            Memory: parseInt(
+              process.env.DEFAULT_CONTAINER_MEMORY || "2147483648"
+            ), // 2GB
+            NanoCpus: parseInt(
+              process.env.DEFAULT_CONTAINER_CPU || "1000000000"
+            ), // 1 CPU
+            RestartPolicy: {
+              Name: "unless-stopped",
+            },
+            AutoRemove: false,
+          },
           Labels: {
             "kalpana.workspace.id": workspaceId,
             "kalpana.managed": "true",
           },
         });
-        console.log(`Created persistent volume: ${volumeName}`);
-      }
 
-      // Remove any existing container with the same name
-      const containerName = `workspace-${workspaceId}`;
-      await this.removeExistingContainer(containerName);
+        // Start container
+        await container.start();
 
-      // Create container with persistent volume
-      const container = await this.docker.createContainer({
-        Image: imageName,
-        name: containerName,
-        Env: [
-          `WORKSPACE_ID=${workspaceId}`,
-          `GITHUB_REPO=${config.githubRepo || ""}`,
-          `GITHUB_TOKEN=${config.githubToken || ""}`,
-          `NIX_CONFIG=${config.nixConfig || ""}`,
-          `TEMPLATE=${config.template || ""}`,
-          `PRESET=${config.preset || "default"}`,
-          `GIT_USER_NAME=${config.gitUserName || ""}`,
-          `GIT_USER_EMAIL=${config.gitUserEmail || ""}`,
-          `CUSTOM_PRESET_SETTINGS=${presetSettings}`,
-          `CUSTOM_PRESET_EXTENSIONS=${presetExtensions}`,
-        ],
-        ExposedPorts: {
-          "8080/tcp": {}, // code-server
-          "3001/tcp": {}, // agent bridge
-        },
-        HostConfig: {
-          PortBindings: {
-            "8080/tcp": [{ HostPort: vscodePort.toString() }],
-            "3001/tcp": [{ HostPort: agentPort.toString() }],
+        // Update workspace with containerId but keep status STARTING
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: {
+            containerId: container.id,
+            // status intentionally left as STARTING; mark RUNNING in API when fully ready
           },
-          Binds: [
-            `${volumeName}:/workspace`, // Mount persistent volume
-          ],
-          Memory: parseInt(
-            process.env.DEFAULT_CONTAINER_MEMORY || "2147483648"
-          ), // 2GB
-          NanoCpus: parseInt(process.env.DEFAULT_CONTAINER_CPU || "1000000000"), // 1 CPU
-          RestartPolicy: {
-            Name: "unless-stopped",
-          },
-          AutoRemove: false,
-        },
-        Labels: {
-          "kalpana.workspace.id": workspaceId,
-          "kalpana.managed": "true",
-        },
-      });
+        });
 
-      // Start container
-      await container.start();
+        // Begin background readiness watcher so status can flip to RUNNING without an active client
+        this.monitorWorkspaceReadiness(workspaceId, container.id).catch((e) => {
+          console.error("Workspace readiness watcher error:", e);
+        });
 
-      // Update workspace with containerId but keep status STARTING
-      await prisma.workspace.update({
-        where: { id: workspaceId },
-        data: {
+        return {
           containerId: container.id,
-          // status intentionally left as STARTING; mark RUNNING in API when fully ready
-        },
-      });
+          vscodePort,
+          agentPort,
+          workspaceId,
+        };
+      } catch (error: any) {
+        // Check if it's a port binding error
+        if (
+          error.message &&
+          (error.message.includes("port is already allocated") ||
+            error.message.includes("address already in use") ||
+            error.message.includes("Bind for"))
+        ) {
+          retries++;
+          if (retries >= maxRetries) {
+            // Rollback on final failure
+            await prisma.workspace.update({
+              where: { id: workspaceId },
+              data: {
+                status: "ERROR",
+                vscodePort: null,
+                agentPort: null,
+              },
+            });
+            throw new Error(
+              `Failed to allocate ports after ${maxRetries} attempts: ${error.message}`
+            );
+          }
 
-      return {
-        containerId: container.id,
-        vscodePort,
-        agentPort,
-        workspaceId,
-      };
-    } catch (error) {
-      // Rollback on error
-      await prisma.workspace.update({
-        where: { id: workspaceId },
-        data: {
-          status: "ERROR",
-          vscodePort: null,
-          agentPort: null,
-        },
-      });
+          console.log(
+            `⚠️ Port binding failed for workspace, finding alternative ports (attempt ${retries}/${maxRetries})...`
+          );
 
-      // Surface clearer error messages to API layer
-      if (
-        typeof error === "object" &&
-        error &&
-        "json" in (error as any) &&
-        (error as any).reason
-      ) {
-        throw new Error(
-          `Docker error: ${
-            (error as any).reason
-          }. Ensure image exists (kalpana/workspace:latest) and Docker is running.`
-        );
+          // Find alternative ports
+          const newPortResult = await this.portManager.allocatePorts();
+          vscodePort = newPortResult.vscodePort;
+          agentPort = newPortResult.agentPort;
+
+          // Update workspace with new ports
+          await prisma.workspace.update({
+            where: { id: workspaceId },
+            data: {
+              vscodePort,
+              agentPort,
+            },
+          });
+
+          // Continue to next retry iteration
+          continue;
+        }
+
+        // Not a port error - rollback and throw
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: {
+            status: "ERROR",
+            vscodePort: null,
+            agentPort: null,
+          },
+        });
+
+        // Surface clearer error messages to API layer
+        if (
+          typeof error === "object" &&
+          error &&
+          "json" in (error as any) &&
+          (error as any).reason
+        ) {
+          throw new Error(
+            `Docker error: ${
+              (error as any).reason
+            }. Ensure image exists (kalpana/workspace:latest) and Docker is running.`
+          );
+        }
+
+        throw error;
       }
-
-      throw error;
     }
+
+    // Should never reach here, but TypeScript needs it
+    throw new Error("Failed to create workspace after all retries");
   }
 
   /**
@@ -575,6 +639,102 @@ export class DockerManager {
     } catch (error) {
       console.error("Error executing command in container:", error);
       throw error;
+    }
+  }
+
+  /**
+   * Watch container logs and automatically mark workspace RUNNING
+   * when both agent bridge and code-server are ready.
+   * Runs in background; safely no-ops on timeout or errors.
+   */
+  private async monitorWorkspaceReadiness(
+    workspaceId: string,
+    containerId: string
+  ): Promise<void> {
+    try {
+      const container = this.docker.getContainer(containerId);
+
+      // Track readiness of subsystems
+      let agentReady = false;
+      let codeServerReady = false;
+      let done = false;
+
+      const finalize = async () => {
+        if (done) return;
+        done = true;
+        try {
+          const info = await container.inspect();
+          if (info.State.Running) {
+            await prisma.workspace.update({
+              where: { id: workspaceId },
+              data: { status: "RUNNING" },
+            });
+          }
+        } catch (e) {
+          // Swallow errors; this is a background helper
+          console.error("Error finalizing workspace readiness:", e);
+        } finally {
+          try {
+            if (logStream && typeof (logStream as any).destroy === "function") {
+              (logStream as any).destroy();
+            }
+          } catch {}
+          clearTimeout(timeoutId);
+        }
+      };
+
+      // Attach to logs; include some tail to capture already-emitted lines
+      const logStream = await container.logs({
+        follow: true,
+        stdout: true,
+        stderr: true,
+        tail: 200,
+        timestamps: false,
+      });
+
+      const onData = (chunk: Buffer) => {
+        if (done) return;
+        const text = chunk
+          .toString("utf-8")
+          .replace(/[\x00-\x1F\x7F-\x9F]/g, "");
+        const lines = text.split("\n").filter((l) => l.trim());
+        for (const line of lines) {
+          if (
+            !agentReady &&
+            (line.includes("Agent bridge started") ||
+              line.includes("Agent bridge running") ||
+              line.includes("WebSocket server available"))
+          ) {
+            agentReady = true;
+          }
+          if (!codeServerReady && line.includes("HTTP server listening")) {
+            codeServerReady = true;
+          }
+
+          if (agentReady && codeServerReady) {
+            // Both subsystems reported ready; mark workspace RUNNING
+            finalize();
+            break;
+          }
+        }
+      };
+
+      logStream.on("data", onData);
+      logStream.on("error", () => {
+        // Ignore log errors; rely on timeout below
+      });
+
+      // Safety timeout: stop watching after 2 minutes
+      const timeoutId = setTimeout(() => {
+        try {
+          if (logStream && typeof (logStream as any).destroy === "function") {
+            (logStream as any).destroy();
+          }
+        } catch {}
+      }, 120000);
+    } catch (error) {
+      // Do not throw; this should never block caller
+      console.error("monitorWorkspaceReadiness failure:", error);
     }
   }
 }

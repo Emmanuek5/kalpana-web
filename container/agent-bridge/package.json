@@ -7,7 +7,10 @@
     "start": "bun run server.ts"
   },
   "dependencies": {
-    "ws": "^8.16.0"
+    "ws": "^8.16.0",
+    "ai": "latest",
+    "@openrouter/ai-sdk-provider": "^latest",
+    "zod": "latest"
   },
   "devDependencies": {
     "@types/ws": "^8.5.10",

@@ -12,20 +12,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { NewAgentDialog } from "@/components/agents/new-agent-dialog";
 import {
   Bot,
   Plus,
   Loader2,
-  AlertCircle,
-  Github,
-  GitBranch,
   Clock,
   Play,
   Trash2,
   CheckCircle2,
   XCircle,
   Upload,
+  Github,
+  GitBranch,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -45,14 +44,6 @@ interface Agent {
   pushedAt?: string;
 }
 
-interface GitHubRepo {
-  id: number;
-  name: string;
-  fullName: string;
-  description: string | null;
-  defaultBranch: string;
-}
-
 export default function AgentsPage() {
   const router = useRouter();
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -61,16 +52,6 @@ export default function AgentsPage() {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [creating, setCreating] = useState(false);
-
-  // Form state
-  const [name, setName] = useState("");
-  const [task, setTask] = useState("");
-  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
-  const [selectedRepo, setSelectedRepo] = useState<string>("");
-  const [sourceBranch, setSourceBranch] = useState("main");
-  const [targetBranch, setTargetBranch] = useState("");
-  const [loadingRepos, setLoadingRepos] = useState(false);
 
   useEffect(() => {
     fetchAgents();
@@ -90,66 +71,8 @@ export default function AgentsPage() {
     }
   };
 
-  const fetchGitHubRepos = async () => {
-    setLoadingRepos(true);
-    try {
-      const res = await fetch("/api/user/github/repos");
-      if (res.ok) {
-        const data = await res.json();
-        setGithubRepos(data.repos || []);
-      } else {
-        alert("Please connect your GitHub account in settings");
-      }
-    } catch (error) {
-      console.error("Failed to fetch GitHub repos:", error);
-    } finally {
-      setLoadingRepos(false);
-    }
-  };
-
   const handleOpenCreate = () => {
-    setName("");
-    setTask("");
-    setSelectedRepo("");
-    setSourceBranch("main");
-    setTargetBranch("");
     setCreateModalOpen(true);
-    fetchGitHubRepos();
-  };
-
-  const handleCreate = async () => {
-    if (!name || !task || !selectedRepo || !targetBranch) {
-      alert("Please fill in all fields");
-      return;
-    }
-
-    setCreating(true);
-    try {
-      const res = await fetch("/api/agents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name,
-          task,
-          githubRepo: selectedRepo,
-          sourceBranch,
-          targetBranch,
-        }),
-      });
-
-      if (res.ok) {
-        await fetchAgents();
-        setCreateModalOpen(false);
-      } else {
-        const error = await res.json();
-        alert(error.error || "Failed to create agent");
-      }
-    } catch (error) {
-      console.error("Error creating agent:", error);
-      alert("Failed to create agent");
-    } finally {
-      setCreating(false);
-    }
   };
 
   const handleStartAgent = async (agent: Agent) => {
@@ -228,7 +151,7 @@ export default function AgentsPage() {
 
   return (
     <div className="flex h-screen bg-zinc-950 overflow-hidden relative">
-      <div className="fixed inset-0 bg-[linear-gradient(to_right,#18181b_1px,transparent_1px),linear-gradient(to_bottom,#18181b_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_0%,#000_70%,transparent_110%)] pointer-events-none" />
+      <div className="fixed inset-0 bg-[linear-gradient(to_right,#18181b_1px,transparent_1px),linear-gradient(to_bottom,#18181b_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_0%,#000_70%,transparent_110%)] pointer-events-none -z-10" />
 
       <Sidebar />
 
@@ -272,7 +195,7 @@ export default function AgentsPage() {
                     your GitHub repositories.
                   </p>
                   <Button
-                    className="bg-gradient-to-r from-emerald-600 to-emerald-500 text-white"
+                    className="bg-gradient-to-r from-emerald-600 to-emerald-500 text-white shadow-lg shadow-emerald-600/20"
                     onClick={handleOpenCreate}
                   >
                     <Plus className="h-5 w-5 mr-2" />
@@ -379,115 +302,12 @@ export default function AgentsPage() {
         </div>
       </div>
 
-      {/* Create Agent Modal */}
-      <Dialog open={createModalOpen} onOpenChange={setCreateModalOpen}>
-        <DialogContent className="bg-zinc-900 border-zinc-800 max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="text-xl font-semibold text-zinc-100">
-              Create New Agent
-            </DialogTitle>
-            <DialogDescription className="text-zinc-500">
-              Configure an autonomous coding agent to work on your GitHub
-              repository.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div>
-              <label className="block text-sm font-medium text-zinc-400 mb-2">
-                Agent Name
-              </label>
-              <Input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Refactor Components"
-                className="bg-zinc-800/50 border-zinc-700/50 focus:border-emerald-500/50"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-zinc-400 mb-2">
-                Task Description
-              </label>
-              <textarea
-                value={task}
-                onChange={(e) => setTask(e.target.value)}
-                placeholder="Describe what the agent should do..."
-                className="w-full min-h-[100px] px-3 py-2 bg-zinc-800/50 border border-zinc-700/50 rounded-lg text-zinc-100 focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-zinc-400 mb-2">
-                GitHub Repository
-              </label>
-              {loadingRepos ? (
-                <div className="flex items-center gap-2 text-zinc-500">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading repositories...
-                </div>
-              ) : (
-                <select
-                  value={selectedRepo}
-                  onChange={(e) => setSelectedRepo(e.target.value)}
-                  className="w-full px-3 py-2 bg-zinc-800/50 border border-zinc-700/50 rounded-lg text-zinc-100"
-                >
-                  <option value="">Select a repository</option>
-                  {githubRepos.map((repo) => (
-                    <option key={repo.id} value={repo.fullName}>
-                      {repo.fullName}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-2">
-                  Source Branch
-                </label>
-                <Input
-                  value={sourceBranch}
-                  onChange={(e) => setSourceBranch(e.target.value)}
-                  placeholder="main"
-                  className="bg-zinc-800/50 border-zinc-700/50"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-2">
-                  Target Branch
-                </label>
-                <Input
-                  value={targetBranch}
-                  onChange={(e) => setTargetBranch(e.target.value)}
-                  placeholder="agent-changes"
-                  className="bg-zinc-800/50 border-zinc-700/50"
-                />
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setCreateModalOpen(false)}
-              className="border-zinc-700/50 hover:bg-zinc-800/50 text-zinc-300"
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleCreate}
-              disabled={creating}
-              className="bg-emerald-600 text-white hover:bg-emerald-500"
-            >
-              {creating ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Creating...
-                </>
-              ) : (
-                "Create Agent"
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Create Agent Dialog */}
+      <NewAgentDialog
+        open={createModalOpen}
+        onOpenChange={setCreateModalOpen}
+        onSuccess={fetchAgents}
+      />
 
       {/* Delete Modal */}
       <Dialog open={deleteModalOpen} onOpenChange={setDeleteModalOpen}>

@@ -80,7 +80,11 @@ class AgentRunner {
     return new Docker({ socketPath: "/var/run/docker.sock" });
   }
 
-  async startAgent(agentId: string, githubToken: string): Promise<void> {
+  async startAgent(
+    agentId: string,
+    githubToken: string,
+    openrouterApiKey: string
+  ): Promise<void> {
     if (this.runningAgents.get(agentId)) {
       throw new Error("Agent is already running");
     }
@@ -121,17 +125,61 @@ class AgentRunner {
         },
       });
 
-      // Allocate port for agent communication
-      const { agentPort } = await this.portManager.allocatePorts();
+      // Allocate port for agent communication (single port)
+      let agentPort = await this.portManager.allocateAgentPort();
 
-      // Create container and clone repo
-      const containerId = await this.createAgentContainer(
-        agentId,
-        agent.githubRepo,
-        agent.sourceBranch,
-        githubToken,
-        agentPort
-      );
+      // Get user details for git configuration
+      const user = await prisma.user.findUnique({
+        where: { id: agent.userId },
+        select: { name: true, email: true },
+      });
+
+      // Create container and clone repo with retry logic for port conflicts
+      let containerId: string | undefined;
+      let retries = 0;
+      const maxRetries = 3;
+
+      while (retries < maxRetries) {
+        try {
+          containerId = await this.createAgentContainer(
+            agentId,
+            agent.githubRepo,
+            agent.sourceBranch,
+            githubToken,
+            agentPort,
+            openrouterApiKey,
+            agent.model,
+            user?.name || undefined,
+            user?.email || undefined
+          );
+          break; // Success, exit retry loop
+        } catch (error: any) {
+          // Check if it's a port binding error
+          if (
+            error.message &&
+            (error.message.includes("port is already allocated") ||
+              error.message.includes("address already in use"))
+          ) {
+            retries++;
+            if (retries >= maxRetries) {
+              throw new Error(
+                `Failed to allocate port after ${maxRetries} attempts: ${error.message}`
+              );
+            }
+            console.log(
+              `⚠️ Port ${agentPort} binding failed, finding alternative (attempt ${retries}/${maxRetries})...`
+            );
+            agentPort = await this.portManager.findAlternativePort(agentPort);
+          } else {
+            // Not a port error, rethrow
+            throw error;
+          }
+        }
+      }
+
+      if (!containerId) {
+        throw new Error("Failed to create container after retries");
+      }
 
       await prisma.agent.update({
         where: { id: agentId },
@@ -142,8 +190,15 @@ class AgentRunner {
         },
       });
 
-      // Execute agent task with context
-      await this.executeAgentTask(agentId, containerId, conversationHistory);
+      // Execute agent task with context (streams to database)
+      await this.executeAgentTask(
+        agentId,
+        containerId,
+        conversationHistory,
+        agentPort,
+        openrouterApiKey,
+        undefined
+      );
 
       this.runningAgents.delete(agentId);
     } catch (error: any) {
@@ -157,6 +212,9 @@ class AgentRunner {
         },
       });
 
+      // Release the allocated port
+      await this.portManager.releaseAgentPort(agentId);
+
       this.runningAgents.delete(agentId);
     }
   }
@@ -164,9 +222,9 @@ class AgentRunner {
   async resumeAgent(
     agentId: string,
     newTask: string,
-    githubToken: string
+    openrouterApiKey: string
   ): Promise<void> {
-    // Resume is similar to start, but maintains existing context
+    // Resume uses the EXISTING container - no restart!
     if (this.runningAgents.get(agentId)) {
       throw new Error("Agent is already running");
     }
@@ -182,43 +240,36 @@ class AgentRunner {
         throw new Error("Agent not found");
       }
 
+      // Verify container still exists
+      if (!agent.containerId || !agent.agentPort) {
+        throw new Error(
+          "Agent container not found. Please start the agent first."
+        );
+      }
+
       // Get existing conversation history
       const conversationHistory = agent.conversationHistory
         ? JSON.parse(agent.conversationHistory)
         : [];
 
-      // Update status to CLONING
+      // Update status to RUNNING
       await prisma.agent.update({
         where: { id: agentId },
         data: {
-          status: "CLONING",
-          startedAt: new Date(),
-        },
-      });
-
-      // Allocate port for agent communication
-      const { agentPort } = await this.portManager.allocatePorts();
-
-      // Create container and clone repo
-      const containerId = await this.createAgentContainer(
-        agentId,
-        agent.githubRepo,
-        agent.sourceBranch,
-        githubToken,
-        agentPort
-      );
-
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: {
-          containerId,
-          agentPort,
           status: "RUNNING",
+          lastMessageAt: new Date(),
         },
       });
 
-      // Execute agent task with full conversation context
-      await this.executeAgentTask(agentId, containerId, conversationHistory);
+      // Execute agent task with full conversation context (no container recreation!)
+      await this.executeAgentTask(
+        agentId,
+        agent.containerId,
+        conversationHistory,
+        agent.agentPort,
+        openrouterApiKey,
+        newTask
+      );
 
       this.runningAgents.delete(agentId);
     } catch (error: any) {
@@ -241,7 +292,11 @@ class AgentRunner {
     githubRepo: string,
     branch: string,
     githubToken: string,
-    agentPort: number
+    agentPort: number,
+    openrouterApiKey: string,
+    model: string,
+    gitUserName?: string,
+    gitUserEmail?: string
   ): Promise<string> {
     // Ensure base image exists
     const imageName = "kalpana/workspace:latest";
@@ -283,16 +338,28 @@ class AgentRunner {
     }
 
     // Create new container
+    const envVars = [
+      `AGENT_ID=${agentId}`,
+      `GITHUB_REPO=${githubRepo}`,
+      `GITHUB_BRANCH=${branch}`,
+      `GITHUB_TOKEN=${githubToken}`,
+      `OPENROUTER_API_KEY=${openrouterApiKey}`,
+      `AGENT_MODEL=${model}`,
+      `AGENT_MODE=true`,
+    ];
+
+    // Add git user info if available
+    if (gitUserName) {
+      envVars.push(`GIT_USER_NAME=${gitUserName}`);
+    }
+    if (gitUserEmail) {
+      envVars.push(`GIT_USER_EMAIL=${gitUserEmail}`);
+    }
+
     const container = await this.docker.createContainer({
       Image: imageName,
       name: containerName,
-      Env: [
-        `AGENT_ID=${agentId}`,
-        `GITHUB_REPO=${githubRepo}`,
-        `GITHUB_BRANCH=${branch}`,
-        `GITHUB_TOKEN=${githubToken}`,
-        `AGENT_MODE=true`,
-      ],
+      Env: envVars,
       ExposedPorts: {
         "3001/tcp": {},
       },
@@ -321,12 +388,40 @@ class AgentRunner {
   }
 
   private async waitForRepoClone(containerId: string): Promise<void> {
-    const maxAttempts = 30;
+    const maxAttempts = 90; // Increased from 30 to 90 (3 minutes total)
     const delayMs = 2000;
+
+    console.log(
+      `⏳ Waiting for repository to clone (max ${
+        (maxAttempts * delayMs) / 1000
+      }s)...`
+    );
 
     for (let i = 0; i < maxAttempts; i++) {
       try {
-        const exec = await this.docker.getContainer(containerId).exec({
+        // First check: Look for the success message in container logs
+        const container = this.docker.getContainer(containerId);
+        const logsStream = await container.logs({
+          stdout: true,
+          stderr: true,
+          tail: 100,
+        });
+        const logsOutput = logsStream.toString();
+
+        // Check if clone success message is in logs
+        if (logsOutput.includes("Repository cloned successfully")) {
+          console.log(
+            `✅ Repository clone confirmed via logs after ${
+              (i + 1) * (delayMs / 1000)
+            }s`
+          );
+          // Wait an additional 2 seconds to ensure filesystem sync
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          return;
+        }
+
+        // Second check: Test for .git directory
+        const exec = await container.exec({
           Cmd: ["test", "-d", "/workspace/.git"],
           AttachStdout: true,
           AttachStderr: true,
@@ -336,23 +431,69 @@ class AgentRunner {
         const inspectResult = await exec.inspect();
 
         if (inspectResult.ExitCode === 0) {
-          console.log("Repository cloned successfully");
+          console.log(
+            `✅ Repository detected via .git directory after ${
+              (i + 1) * (delayMs / 1000)
+            }s`
+          );
+          // Wait an additional 2 seconds to ensure the clone is fully complete
+          await new Promise((resolve) => setTimeout(resolve, 2000));
           return;
         }
-      } catch (_e) {
-        // Not ready yet
+      } catch (error: any) {
+        // Container might not be ready yet or command failed
+        if (i % 10 === 0) {
+          console.log(
+            `⏳ Still waiting for clone... (attempt ${i + 1}/${maxAttempts})`
+          );
+        }
       }
 
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
-    throw new Error("Timeout waiting for repository to clone");
+    // One final check before giving up
+    try {
+      const container = this.docker.getContainer(containerId);
+      const logsStream = await container.logs({
+        stdout: true,
+        stderr: true,
+        tail: 200,
+      });
+      const logsOutput = logsStream.toString();
+
+      if (logsOutput.includes("Repository cloned successfully")) {
+        console.log(`✅ Repository clone confirmed via logs on final attempt`);
+        return;
+      }
+
+      const exec = await container.exec({
+        Cmd: ["test", "-d", "/workspace/.git"],
+        AttachStdout: true,
+        AttachStderr: true,
+      });
+      const stream = await exec.start({ Detach: false });
+      const inspectResult = await exec.inspect();
+      if (inspectResult.ExitCode === 0) {
+        console.log(`✅ Repository detected on final attempt`);
+        return;
+      }
+    } catch (_e) {
+      // Final attempt failed
+    }
+
+    throw new Error(
+      "Timeout waiting for repository to clone - exceeded 3 minutes"
+    );
   }
 
   private async executeAgentTask(
     agentId: string,
     containerId: string,
-    conversationHistory: any[]
+    conversationHistory: any[],
+    agentPort: number,
+    openrouterApiKey: string,
+    newTask?: string
   ): Promise<void> {
     const agent = await prisma.agent.findUnique({
       where: { id: agentId },
@@ -362,94 +503,205 @@ class AgentRunner {
       throw new Error("Agent not found");
     }
 
-    const toolCalls: ToolCall[] = [];
-    const filesEdited: EditedFile[] = [];
+    // Determine the task (new task for resume, or initial task for start)
+    const task = newTask || agent.task;
 
-    // Get list of files in repo
-    const { stdout: filesOutput } = await this.execInContainer(containerId, [
-      "find",
-      "/workspace",
-      "-type",
-      "f",
-      "-not",
-      "-path",
-      "*/.git/*",
-    ]);
+    // Always use /agent/execute with conversation history
+    // This ensures the agent is properly initialized every time
+    const endpoint = `http://localhost:${agentPort}/agent/execute`;
 
-    const files = filesOutput
-      .split("\n")
-      .filter((f) => f.trim())
-      .map((f) => f.replace("/workspace/", ""));
-
-    // Read file contents
-    const fileContents = await Promise.all(
-      files.slice(0, 50).map(async (filePath) => {
-        try {
-          const { stdout } = await this.execInContainer(containerId, [
-            "cat",
-            `/workspace/${filePath}`,
-          ]);
-          return { path: filePath, content: stdout };
-        } catch (_e) {
-          return null;
-        }
-      })
-    );
-
-    const validFiles = fileContents.filter((f) => f !== null) as {
-      path: string;
-      content: string;
-    }[];
-
-    // Get the latest task from conversation history
-    const latestUserMessage = [...conversationHistory]
-      .reverse()
-      .find((msg) => msg.role === "user");
-
-    const currentTask = latestUserMessage?.content || agent.task;
-
-    // Log task execution with context
-    toolCalls.push({
-      id: Date.now().toString(),
-      type: "function",
-      function: {
-        name: "execute_with_context",
-        arguments: JSON.stringify({
-          currentTask,
-          previousMessages: conversationHistory.length,
-          filesAvailable: validFiles.length,
-        }),
-      },
-      timestamp: new Date().toISOString(),
-    });
-
-    // TODO: Integrate actual AI agent execution with conversation context
-    // This would use the agent-tools and execute the task with full context
-    // The agent will have access to:
-    // - All previous conversation messages
-    // - Previously edited files
-    // - Current repository state
-
-    // Add assistant response to conversation
-    const assistantResponse = {
-      role: "assistant",
-      content: `Analyzing repository and executing task with context from ${conversationHistory.length} previous messages...`,
-      timestamp: new Date().toISOString(),
-      type: "execution",
+    const requestBody = {
+      task,
+      apiKey: openrouterApiKey,
+      model: agent.model,
+      conversationHistory: conversationHistory.filter(
+        (msg) => msg.role === "user" || msg.role === "assistant"
+      ),
     };
 
-    conversationHistory.push(assistantResponse);
+    console.log(`📤 Sending task to agent container: ${endpoint}`);
+    console.log(
+      `   Task: ${task.substring(0, 100)}${task.length > 100 ? "..." : ""}`
+    );
+    console.log(`   Model: ${agent.model}`);
+    console.log(
+      `   Conversation history: ${
+        conversationHistory.filter(
+          (msg) => msg.role === "user" || msg.role === "assistant"
+        ).length
+      } messages`
+    );
 
-    await prisma.agent.update({
-      where: { id: agentId },
-      data: {
-        toolCalls: JSON.stringify(toolCalls),
-        filesEdited: JSON.stringify(filesEdited),
-        conversationHistory: JSON.stringify(conversationHistory),
-        status: "COMPLETED",
-        completedAt: new Date(),
-      },
-    });
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          `Agent container returned error: ${response.status} ${response.statusText}`
+        );
+      }
+
+      // Stream the response
+      let fullResponse = "";
+      const toolCallsCollected: any[] = [];
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        throw new Error("No response body stream available");
+      }
+
+      // Track last save time for incremental updates
+      let lastSaveTime = Date.now();
+      const SAVE_INTERVAL_MS = 2000; // Save every 2 seconds
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              // Handle errors FIRST and outside of the generic catch
+              if (data.type === "error") {
+                console.error(
+                  `❌ Agent container reported error: ${data.error}`
+                );
+                throw new Error(data.error || "Agent execution failed");
+              }
+
+              if (data.type === "text") {
+                fullResponse += data.content;
+                // Don't log every tiny chunk, just show we're receiving
+                if (fullResponse.length % 500 === 0) {
+                  console.log(
+                    `📝 Agent streaming... (${fullResponse.length} chars so far)`
+                  );
+                }
+
+                // Save incrementally every 2 seconds while streaming
+                const now = Date.now();
+                if (now - lastSaveTime > SAVE_INTERVAL_MS) {
+                  lastSaveTime = now;
+
+                  // Update with current progress
+                  const tempHistory = [
+                    ...conversationHistory,
+                    {
+                      role: "assistant",
+                      content: fullResponse,
+                      timestamp: new Date().toISOString(),
+                      streaming: true,
+                    },
+                  ];
+
+                  await prisma.agent.update({
+                    where: { id: agentId },
+                    data: {
+                      conversationHistory: JSON.stringify(tempHistory),
+                      toolCalls: JSON.stringify(toolCallsCollected),
+                      lastMessageAt: new Date(),
+                    },
+                  });
+                }
+              } else if (data.type === "tool-call") {
+                // Collect tool call information for display
+                toolCallsCollected.push({
+                  id: data.toolCallId || Date.now().toString(),
+                  type: "function",
+                  function: {
+                    name: data.toolName,
+                    arguments: JSON.stringify(data.args || {}),
+                  },
+                  timestamp: new Date().toISOString(),
+                });
+                console.log(`🔧 Tool called: ${data.toolName}`);
+
+                // Save tool calls immediately
+                await prisma.agent.update({
+                  where: { id: agentId },
+                  data: {
+                    toolCalls: JSON.stringify(toolCallsCollected),
+                    lastMessageAt: new Date(),
+                  },
+                });
+              } else if (data.type === "done") {
+                console.log(`✅ Agent task completed`);
+                console.log(
+                  `   Response: ${fullResponse.substring(0, 200)}${
+                    fullResponse.length > 200 ? "..." : ""
+                  }`
+                );
+                console.log(
+                  `   Total response length: ${fullResponse.length} chars`
+                );
+                console.log(
+                  `   Files edited: ${data.state?.filesEdited?.length || 0}`
+                );
+                console.log(
+                  `   Tool calls: ${data.state?.toolCallsCount || 0}`
+                );
+
+                // Add final assistant response to conversation history
+                conversationHistory.push({
+                  role: "assistant",
+                  content: fullResponse,
+                  timestamp: new Date().toISOString(),
+                });
+
+                // Update agent in database with final results
+                await prisma.agent.update({
+                  where: { id: agentId },
+                  data: {
+                    conversationHistory: JSON.stringify(conversationHistory),
+                    filesEdited: JSON.stringify(data.state?.filesEdited || []),
+                    toolCalls: JSON.stringify(toolCallsCollected),
+                    status: "COMPLETED",
+                    completedAt: new Date(),
+                    lastMessageAt: new Date(),
+                  },
+                });
+              }
+            } catch (e: any) {
+              // Only skip lines that are genuinely invalid JSON
+              // Re-throw actual errors from agent execution
+              if (
+                e.message &&
+                (e.message.includes("Agent") ||
+                  e.message.includes("Authentication"))
+              ) {
+                throw e;
+              }
+              // Skip invalid JSON lines silently
+              console.debug(`Skipping invalid SSE line: ${line}`);
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      console.error(`❌ Agent execution error:`, error);
+
+      // Save error to database
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          status: "ERROR",
+          errorMessage: error.message || "Unknown error occurred",
+          lastMessageAt: new Date(),
+        },
+      });
+
+      throw error;
+    }
   }
 
   private async execInContainer(

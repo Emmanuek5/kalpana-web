@@ -19,6 +19,13 @@ import {
   FileCode,
   Activity,
   PlayCircle,
+  ChevronDown,
+  ChevronUp,
+  Terminal as TerminalIcon,
+  Search,
+  GitCommit,
+  AlertCircle,
+  Brain,
 } from "lucide-react";
 import { useRouter, useParams } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -64,6 +71,31 @@ interface EditedFile {
   diff: string;
 }
 
+const TOOL_ICONS: Record<string, React.ComponentType<any>> = {
+  listFiles: TerminalIcon,
+  readFile: FileCode,
+  searchCode: Search,
+  runCommand: TerminalIcon,
+  writeFile: FileCode,
+  deleteFile: FileCode,
+  moveFile: FileCode,
+  createDirectory: TerminalIcon,
+  fileTree: TerminalIcon,
+  gitCommit: GitCommit,
+  webResearch: Search,
+  editCode: FileCode,
+  getConsoleLogs: TerminalIcon,
+  getLintErrors: AlertCircle,
+  list_directory: TerminalIcon,
+  read_file: FileCode,
+  write_file: FileCode,
+  search_files: Search,
+  run_command: TerminalIcon,
+  git_status: GitCommit,
+  git_diff: GitCommit,
+  git_log: GitCommit,
+};
+
 export default function AgentDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -82,14 +114,106 @@ export default function AgentDetailPage() {
   const [chatMessage, setChatMessage] = useState("");
   const [sendingChat, setSendingChat] = useState(false);
   const [resuming, setResuming] = useState(false);
+  const [liveMessages, setLiveMessages] = useState<
+    Array<{ role: "user" | "assistant"; content: string; timestamp: string }>
+  >([]);
+  const [liveToolCalls, setLiveToolCalls] = useState<ToolCall[]>([]);
+  const [streamingText, setStreamingText] = useState("");
+  const [isLiveStreaming, setIsLiveStreaming] = useState(false);
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (agentId) {
       fetchAgent();
-      const interval = setInterval(fetchAgent, 3000);
-      return () => clearInterval(interval);
+      // Connect to SSE stream for real-time updates
+      connectToStream();
     }
   }, [agentId]);
+
+  const connectToStream = () => {
+    if (!agentId) return;
+
+    const eventSource = new EventSource(`/api/agents/${agentId}/stream`);
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        switch (data.type) {
+          case "init":
+            console.log("SSE connected:", data);
+            setIsLiveStreaming(true);
+            break;
+
+          case "status":
+            setAgent((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: data.status,
+                    errorMessage: data.error || prev.errorMessage,
+                  }
+                : null
+            );
+            // Show error alert if status is ERROR
+            if (data.status === "ERROR" && data.error) {
+              console.error("Agent error:", data.error);
+            }
+            break;
+
+          case "tool-call":
+            setLiveToolCalls((prev) => [...prev, data.toolCall]);
+            setToolCalls((prev) => [...prev, data.toolCall]);
+            break;
+
+          case "message":
+            setLiveMessages((prev) => [...prev, data.message]);
+            setConversation((prev) => [...prev, data.message]);
+            setStreamingText(""); // Clear streaming text when message completes
+            break;
+
+          case "streaming":
+            // Update the streaming text for the current message
+            setStreamingText(data.content);
+            break;
+
+          case "files":
+            setFilesEdited(data.files);
+            if (data.files.length > 0 && !selectedFile) {
+              setSelectedFile(data.files[0]);
+            }
+            break;
+
+          case "done":
+            setIsLiveStreaming(false);
+            setStreamingText("");
+            fetchAgent(); // Fetch final state
+            break;
+
+          default:
+            console.log("Unknown SSE event type:", data.type);
+        }
+      } catch (error) {
+        console.error("Error parsing SSE data:", error);
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("SSE error:", error);
+      setIsLiveStreaming(false);
+      eventSource.close();
+
+      // Fallback to polling if SSE fails
+      const interval = setInterval(fetchAgent, 3000);
+      return () => clearInterval(interval);
+    };
+
+    // Cleanup on unmount
+    return () => {
+      eventSource.close();
+      setIsLiveStreaming(false);
+    };
+  };
 
   const fetchAgent = async () => {
     try {
@@ -99,11 +223,13 @@ export default function AgentDetailPage() {
         setAgent(data);
 
         if (data.toolCalls) {
-          setToolCalls(JSON.parse(data.toolCalls));
+          const parsed = JSON.parse(data.toolCalls);
+          // Handle both old format (array) and new format (object with count)
+          setToolCalls(Array.isArray(parsed) ? parsed : []);
         }
         if (data.filesEdited) {
           const files = JSON.parse(data.filesEdited);
-          setFilesEdited(files);
+          setFilesEdited(Array.isArray(files) ? files : []);
           if (files.length > 0 && !selectedFile) {
             setSelectedFile(files[0]);
           }
@@ -303,14 +429,22 @@ export default function AgentDetailPage() {
               </h1>
               <p className="text-sm text-zinc-500">{agent.task}</p>
             </div>
-            <Badge
-              className={`${
-                statusConfig[agent.status].color
-              } text-xs font-semibold flex items-center gap-1.5 px-3 py-1.5`}
-            >
-              {statusConfig[agent.status].icon}
-              {agent.status.charAt(0) + agent.status.slice(1).toLowerCase()}
-            </Badge>
+            <div className="flex items-center gap-2">
+              {isLiveStreaming && (
+                <Badge className="bg-emerald-500/20 text-emerald-300 border-emerald-500/30 text-xs font-semibold flex items-center gap-1.5 px-3 py-1.5">
+                  <div className="h-2 w-2 bg-emerald-400 rounded-full animate-pulse" />
+                  Live
+                </Badge>
+              )}
+              <Badge
+                className={`${
+                  statusConfig[agent.status].color
+                } text-xs font-semibold flex items-center gap-1.5 px-3 py-1.5`}
+              >
+                {statusConfig[agent.status].icon}
+                {agent.status.charAt(0) + agent.status.slice(1).toLowerCase()}
+              </Badge>
+            </div>
             {agent.status === "COMPLETED" && !agent.pushedAt && (
               <Button
                 size="sm"
@@ -346,6 +480,23 @@ export default function AgentDetailPage() {
               </span>
             </div>
           </div>
+
+          {/* Error Message Banner */}
+          {agent.status === "ERROR" && agent.errorMessage && (
+            <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+              <div className="flex items-start gap-2">
+                <XCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-red-300">
+                    Agent Error
+                  </p>
+                  <p className="text-xs text-red-400 mt-1">
+                    {agent.errorMessage}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Main Content */}
@@ -474,43 +625,153 @@ export default function AgentDetailPage() {
                 )}
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                {conversation.length === 0 ? (
-                  <p className="text-sm text-zinc-500">
-                    No conversation yet. Chat with the agent to discuss its work
-                    or give it new instructions.
-                  </p>
-                ) : (
-                  conversation.map((msg, idx) => (
-                    <div
-                      key={idx}
-                      className={`flex ${
-                        msg.role === "user" ? "justify-end" : "justify-start"
-                      }`}
-                    >
-                      <Card
-                        className={`p-3 max-w-[85%] ${
-                          msg.role === "user"
-                            ? "bg-emerald-600/20 border-emerald-500/30"
-                            : "bg-zinc-900/50 border-zinc-800/50"
-                        }`}
-                      >
-                        <div className="flex items-start gap-2">
-                          {msg.role === "assistant" && (
-                            <Bot className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" />
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs text-zinc-300 whitespace-pre-wrap">
-                              {msg.content}
-                            </p>
-                            <p className="mt-1 text-xs text-zinc-600">
-                              {new Date(msg.timestamp).toLocaleTimeString()}
-                            </p>
-                          </div>
-                        </div>
-                      </Card>
+              <div className="flex-1 overflow-y-auto p-4">
+                {conversation.length === 0 &&
+                !streamingText &&
+                toolCalls.length === 0 ? (
+                  <div className="h-full flex items-center justify-center">
+                    <div className="text-center max-w-md">
+                      <div className="mb-3 text-3xl">⚡</div>
+                      <p className="text-sm text-zinc-500">
+                        Agent ready. Conversation will appear here.
+                      </p>
                     </div>
-                  ))
+                  </div>
+                ) : (
+                  <div className="max-w-3xl mx-auto space-y-4">
+                    {conversation.map((msg, idx) => (
+                      <div key={idx} className="space-y-2">
+                        {/* User Messages */}
+                        {msg.role === "user" && (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2 mb-1">
+                              <div className="h-5 w-5 rounded-md bg-zinc-800/50 flex items-center justify-center">
+                                <span className="text-[10px] text-zinc-400">
+                                  You
+                                </span>
+                              </div>
+                            </div>
+                            <div className="text-sm text-zinc-200 leading-relaxed">
+                              {msg.content}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Assistant Messages */}
+                        {msg.role === "assistant" && (
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-2 mb-1">
+                              <div className="h-5 w-5 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                                <Brain className="h-3 w-3 text-emerald-500" />
+                              </div>
+                              <span className="text-[10px] text-zinc-500 font-medium">
+                                Agent
+                              </span>
+                            </div>
+                            <div className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                              {msg.content}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+
+                    {/* Tool Calls */}
+                    {toolCalls.length > 0 && (
+                      <div className="space-y-2">
+                        {toolCalls.map((toolCall) => {
+                          const isExpanded = expandedTools.has(toolCall.id);
+                          const IconComponent =
+                            TOOL_ICONS[
+                              toolCall.function?.name || toolCall.type
+                            ] || TerminalIcon;
+
+                          return (
+                            <div
+                              key={toolCall.id}
+                              className="group relative bg-zinc-900/30 border border-zinc-800/40 rounded-lg overflow-hidden hover:border-zinc-700/60 transition-colors"
+                            >
+                              <button
+                                onClick={() =>
+                                  setExpandedTools((prev) => {
+                                    const newSet = new Set(prev);
+                                    if (newSet.has(toolCall.id)) {
+                                      newSet.delete(toolCall.id);
+                                    } else {
+                                      newSet.add(toolCall.id);
+                                    }
+                                    return newSet;
+                                  })
+                                }
+                                className="w-full px-3 py-2 flex items-center gap-2.5 text-left"
+                              >
+                                <div className="h-5 w-5 rounded bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                                  <IconComponent className="h-3 w-3 text-emerald-500" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <span className="text-xs font-medium text-zinc-400 block">
+                                    {(toolCall.function?.name || toolCall.type)
+                                      .replace(/([A-Z])/g, " $1")
+                                      .replace(/_/g, " ")
+                                      .trim()}
+                                  </span>
+                                  <span className="text-[10px] text-zinc-600 block mt-0.5">
+                                    {new Date(
+                                      toolCall.timestamp
+                                    ).toLocaleTimeString()}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  {isExpanded ? (
+                                    <ChevronUp className="h-3 w-3 text-zinc-600" />
+                                  ) : (
+                                    <ChevronDown className="h-3 w-3 text-zinc-600" />
+                                  )}
+                                </div>
+                              </button>
+                              {isExpanded && toolCall.function?.arguments && (
+                                <div className="px-3 pb-3 border-t border-zinc-800/30 bg-black/10">
+                                  <div className="mt-2">
+                                    <div className="text-[10px] font-semibold text-emerald-500/70 mb-1 tracking-wide">
+                                      ARGUMENTS
+                                    </div>
+                                    <div className="text-xs text-zinc-400 bg-zinc-950/50 border border-zinc-800/30 p-2 rounded overflow-auto max-h-40 font-mono">
+                                      {JSON.stringify(
+                                        JSON.parse(toolCall.function.arguments),
+                                        null,
+                                        2
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Show streaming message */}
+                    {streamingText && (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="h-5 w-5 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                            <Brain className="h-3 w-3 text-emerald-500" />
+                          </div>
+                          <span className="text-[10px] text-zinc-500 font-medium">
+                            Agent
+                          </span>
+                        </div>
+                        <div className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                          {streamingText}
+                        </div>
+                        <div className="flex items-center gap-2 text-zinc-600 text-xs">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          <span>Streaming...</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             )}

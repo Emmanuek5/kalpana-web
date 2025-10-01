@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { prisma } from "@/lib/db";
 import { deploymentManager } from "@/lib/docker/deployment-manager";
+import { encryptEnvVars, decryptEnvVars } from "@/lib/crypto";
 
 // GET /api/deployments/:id - Get deployment details
 export async function GET(
@@ -22,12 +23,17 @@ export async function GET(
   const deployment = await prisma.deployment.findFirst({
     where: {
       id: deploymentId,
-      workspace: {
-        userId: session.user.id,
-      },
+      userId: session.user.id, // Direct ownership check for both standalone and workspace deployments
     },
     include: {
-      workspace: true,
+      workspace: {
+        select: {
+          id: true,
+          name: true,
+          status: true,
+        },
+      },
+      domain: true,
       builds: {
         orderBy: { createdAt: "desc" },
         take: 10,
@@ -42,7 +48,15 @@ export async function GET(
     );
   }
 
-  return NextResponse.json({ deployment });
+  // Decrypt environment variables before sending to client
+  const decryptedDeployment = {
+    ...deployment,
+    envVars: deployment.envVars
+      ? JSON.stringify(decryptEnvVars(deployment.envVars))
+      : null,
+  };
+
+  return NextResponse.json({ deployment: decryptedDeployment });
 }
 
 // DELETE /api/deployments/:id - Delete deployment
@@ -64,9 +78,7 @@ export async function DELETE(
   const deployment = await prisma.deployment.findFirst({
     where: {
       id: deploymentId,
-      workspace: {
-        userId: session.user.id,
-      },
+      userId: session.user.id, // Direct ownership check
     },
   });
 
@@ -108,9 +120,7 @@ export async function PATCH(
   const deployment = await prisma.deployment.findFirst({
     where: {
       id: deploymentId,
-      workspace: {
-        userId: session.user.id,
-      },
+      userId: session.user.id, // Direct ownership check
     },
   });
 
@@ -128,10 +138,12 @@ export async function PATCH(
       description,
       buildCommand,
       startCommand,
+      installCommand,
       workingDir,
       port,
       envVars,
       subdomain,
+      domainId,
       autoRebuild,
     } = body;
 
@@ -142,15 +154,37 @@ export async function PATCH(
         ...(description !== undefined && { description }),
         ...(buildCommand !== undefined && { buildCommand }),
         ...(startCommand && { startCommand }),
+        ...(installCommand !== undefined && { installCommand }),
         ...(workingDir !== undefined && { workingDir }),
         ...(port && { port: parseInt(port) }),
-        ...(envVars && { envVars: JSON.stringify(envVars) }),
+        ...(envVars !== undefined && {
+          envVars: envVars ? encryptEnvVars(JSON.parse(envVars)) : null,
+        }),
         ...(subdomain !== undefined && { subdomain }),
+        ...(domainId !== undefined && { domainId }),
         ...(autoRebuild !== undefined && { autoRebuild }),
+      },
+      include: {
+        domain: true,
+        workspace: {
+          select: {
+            id: true,
+            name: true,
+            status: true,
+          },
+        },
       },
     });
 
-    return NextResponse.json({ deployment: updated });
+    // Decrypt environment variables before sending to client
+    const decryptedUpdated = {
+      ...updated,
+      envVars: updated.envVars
+        ? JSON.stringify(decryptEnvVars(updated.envVars))
+        : null,
+    };
+
+    return NextResponse.json({ deployment: decryptedUpdated });
   } catch (error: any) {
     console.error("Error updating deployment:", error);
     return NextResponse.json(

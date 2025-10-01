@@ -23,9 +23,7 @@ export async function POST(
   const deployment = await prisma.deployment.findFirst({
     where: {
       id: deploymentId,
-      workspace: {
-        userId: session.user.id,
-      },
+      userId: session.user.id, // Direct ownership check
     },
   });
 

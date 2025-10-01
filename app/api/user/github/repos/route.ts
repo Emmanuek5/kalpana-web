@@ -16,7 +16,7 @@ interface GitHubRepo {
   stargazers_count: number;
 }
 
-// GET user's GitHub repositories
+// GET user's GitHub repositories or branches
 export async function GET(req: NextRequest) {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -43,12 +43,51 @@ export async function GET(req: NextRequest) {
     }
 
     const { searchParams } = new URL(req.url);
+
+    // Check if fetching branches for a specific repo
+    const owner = searchParams.get("owner");
+    const repo = searchParams.get("repo");
+    const fetchBranches = searchParams.get("branches") === "true";
+
+    if (owner && repo && fetchBranches) {
+      // Fetch branches for specific repository
+      const branchesRes = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/branches`,
+        {
+          headers: {
+            Authorization: `Bearer ${account.accessToken}`,
+            Accept: "application/vnd.github.v3+json",
+          },
+        }
+      );
+
+      if (!branchesRes.ok) {
+        const error = await branchesRes.text();
+        console.error("GitHub API error (branches):", error);
+        return NextResponse.json(
+          { error: "Failed to fetch branches from GitHub" },
+          { status: branchesRes.status }
+        );
+      }
+
+      const branches = await branchesRes.json();
+
+      return NextResponse.json({
+        branches: branches.map((branch: any) => ({
+          name: branch.name,
+          commit: {
+            sha: branch.commit.sha,
+          },
+        })),
+      });
+    }
+
+    // Fetch repositories
     const page = parseInt(searchParams.get("page") || "1");
-    const perPage = parseInt(searchParams.get("per_page") || "30");
+    const perPage = parseInt(searchParams.get("per_page") || "100");
     const sort = searchParams.get("sort") || "updated";
     const type = searchParams.get("type") || "all"; // all, owner, public, private
 
-    // Fetch repositories from GitHub
     const res = await fetch(
       `https://api.github.com/user/repos?page=${page}&per_page=${perPage}&sort=${sort}&type=${type}`,
       {

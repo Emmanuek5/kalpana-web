@@ -34,14 +34,20 @@ export async function POST(
       );
     }
 
-    // Get GitHub access token
-    const account = await prisma.account.findFirst({
-      where: {
-        userId: session.user.id,
-        providerId: "github",
-      },
-      select: { accessToken: true },
-    });
+    // Get GitHub access token and OpenRouter API key
+    const [account, user] = await Promise.all([
+      prisma.account.findFirst({
+        where: {
+          userId: session.user.id,
+          providerId: "github",
+        },
+        select: { accessToken: true },
+      }),
+      prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { openrouterApiKey: true },
+      }),
+    ]);
 
     if (!account?.accessToken) {
       return NextResponse.json(
@@ -50,10 +56,23 @@ export async function POST(
       );
     }
 
+    // Use user's API key if available, otherwise use default
+    const openrouterApiKey =
+      user?.openrouterApiKey || process.env.OPENROUTER_API_KEY!;
+
+    if (!openrouterApiKey) {
+      return NextResponse.json(
+        { error: "OpenRouter API key not configured" },
+        { status: 400 }
+      );
+    }
+
     // Start the agent execution in background
-    agentRunner.startAgent(id, account.accessToken).catch((error) => {
-      console.error(`Error running agent ${id}:`, error);
-    });
+    agentRunner
+      .startAgent(id, account.accessToken, openrouterApiKey)
+      .catch((error) => {
+        console.error(`Error running agent ${id}:`, error);
+      });
 
     return NextResponse.json({ success: true, message: "Agent started" });
   } catch (error) {

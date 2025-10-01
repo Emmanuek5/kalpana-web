@@ -4,11 +4,16 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import * as path from "path";
 import { existsSync } from "fs";
+import { AgentExecutor } from "./agent-executor";
+import { createServer } from "http";
 
 const execAsync = promisify(exec);
 const WORKSPACE_ROOT = "/workspace";
 const PORT = 3001; // Agent bridge server port
 const VSCODE_EXTENSION_PORT = 3002; // VS Code extension server port
+
+// Agent executor instance (initialized when agent starts)
+let agentExecutor: AgentExecutor | null = null;
 
 // WebSocket client to connect to VS Code extension
 let vscodeWs: WebSocket | null = null;
@@ -134,7 +139,7 @@ interface Response {
   error?: string;
 }
 
-const wss = new WebSocketServer({ port: PORT });
+const wss = new WebSocketServer({ noServer: true });
 
 // Console logs and errors buffer
 interface LogEntry {
@@ -779,12 +784,237 @@ process.on("unhandledRejection", (reason: any) => {
   });
 });
 
+// ========== HTTP Server for Agent Endpoints ==========
+const httpServer = createServer(async (req, res) => {
+  // Enable CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  const url = new URL(req.url || "/", `http://${req.headers.host}`);
+
+  // POST /agent/execute - Start agent execution
+  if (url.pathname === "/agent/execute" && req.method === "POST") {
+    try {
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk;
+      }
+
+      const { task, apiKey, model, conversationHistory } = JSON.parse(body);
+
+      console.log(`📥 Received task request:`, {
+        taskLength: task?.length || 0,
+        hasApiKey: !!apiKey,
+        model: model || "default",
+        historyLength: conversationHistory?.length || 0,
+      });
+
+      // Use provided API key or fall back to environment variable
+      const effectiveApiKey = apiKey || process.env.OPENROUTER_API_KEY;
+
+      if (!effectiveApiKey) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "API key required (not found in request or environment)",
+          })
+        );
+        return;
+      }
+
+      console.log(`🤖 Initializing agent with model: ${model}`);
+
+      // Initialize agent executor
+      agentExecutor = new AgentExecutor(effectiveApiKey, model);
+
+      // Set conversation history if provided (for resume)
+      if (conversationHistory && Array.isArray(conversationHistory)) {
+        console.log(
+          `📚 Restoring ${conversationHistory.length} conversation messages`
+        );
+        agentExecutor.setConversationHistory(conversationHistory);
+      }
+
+      console.log(
+        `▶️ Starting agent execution for task: ${task.substring(0, 100)}...`
+      );
+
+      // Stream response using Server-Sent Events
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      });
+
+      console.log(`🎯 [Server] Starting to stream agent execution response...`);
+
+      try {
+        let chunkCount = 0;
+        console.log(`📡 [Server] Entering for-await loop...`);
+
+        for await (const chunk of agentExecutor.execute(task)) {
+          chunkCount++;
+          console.log(
+            `📨 [Server] Received chunk ${chunkCount} from agent: ${chunk.substring(
+              0,
+              50
+            )}...`
+          );
+          res.write(
+            `data: ${JSON.stringify({ type: "text", content: chunk })}\n\n`
+          );
+          console.log(`✅ [Server] Chunk ${chunkCount} written to response`);
+        }
+
+        console.log(
+          `🏁 [Server] For-await loop completed with ${chunkCount} chunks`
+        );
+
+        const state = agentExecutor.getState();
+        console.log(`✅ Agent execution completed:`, {
+          chunksStreamed: chunkCount,
+          toolCalls: state.toolCallsCount,
+          filesEdited: state.filesEdited.length,
+        });
+
+        res.write(`data: ${JSON.stringify({ type: "done", state })}\n\n`);
+        console.log(`📤 [Server] Sent "done" message to client`);
+      } catch (error: any) {
+        console.error(`❌ Agent execution error:`, error);
+        console.error(`❌ Error stack:`, error.stack);
+        res.write(
+          `data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`
+        );
+      }
+
+      res.end();
+    } catch (error: any) {
+      console.error("Error in /agent/execute:", error);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // POST /agent/chat - Continue conversation
+  if (url.pathname === "/agent/chat" && req.method === "POST") {
+    try {
+      if (!agentExecutor) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "Agent not initialized. Call /agent/execute first.",
+          })
+        );
+        return;
+      }
+
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk;
+      }
+
+      const { message } = JSON.parse(body);
+
+      if (!message) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Message required" }));
+        return;
+      }
+
+      // Stream response using Server-Sent Events
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      });
+
+      try {
+        for await (const chunk of agentExecutor.chat(message)) {
+          res.write(
+            `data: ${JSON.stringify({ type: "text", content: chunk })}\n\n`
+          );
+        }
+
+        const state = agentExecutor.getState();
+        res.write(`data: ${JSON.stringify({ type: "done", state })}\n\n`);
+      } catch (error: any) {
+        res.write(
+          `data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`
+        );
+      }
+
+      res.end();
+    } catch (error: any) {
+      console.error("Error in /agent/chat:", error);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // GET /agent/status - Get agent status
+  if (url.pathname === "/agent/status" && req.method === "GET") {
+    try {
+      if (!agentExecutor) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ initialized: false }));
+        return;
+      }
+
+      const state = agentExecutor.getState();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          initialized: true,
+          ...state,
+        })
+      );
+    } catch (error: any) {
+      console.error("Error in /agent/status:", error);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // GET /health - Health check
+  if (url.pathname === "/health" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", workspace: WORKSPACE_ROOT }));
+    return;
+  }
+
+  // 404 for unknown routes
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Not found" }));
+});
+
+// Start HTTP server on the same port (WebSocket will upgrade)
+httpServer.on("upgrade", (request, socket, head) => {
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit("connection", ws, request);
+  });
+});
+
+httpServer.listen(PORT, () => {
+  console.log(`✅ Agent bridge running on http://0.0.0.0:${PORT}`);
+  console.log(`✅ WebSocket server available at ws://0.0.0.0:${PORT}`);
+  console.log(`📂 Workspace root: ${WORKSPACE_ROOT}`);
+  console.log(`📊 Error tracking enabled`);
+  console.log(`🤖 Agent endpoints available:
+    POST /agent/execute - Start agent execution
+    POST /agent/chat - Continue conversation
+    GET  /agent/status - Get agent status
+    GET  /health - Health check`);
+});
+
 // Connect to VS Code extension
 connectToVSCodeExtension();
-
-console.log(`✅ Agent bridge running on ws://0.0.0.0:${PORT}`);
-console.log(`📂 Workspace root: ${WORKSPACE_ROOT}`);
-console.log(`📊 Error tracking enabled`);
-console.log(
-  `🔌 Connecting to VS Code extension on port ${VSCODE_EXTENSION_PORT}...`
-);

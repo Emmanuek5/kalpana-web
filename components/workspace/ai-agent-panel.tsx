@@ -573,65 +573,14 @@ export function AIAgentPanel({
           </div>
         )}
       </div>
-
-      {/* Input Area - Modern Style */}
-      <div className="p-4 border-t border-zinc-800/30 shrink-0">
-        <div className="max-w-3xl mx-auto">
-          {/* Attached Files */}
-          {attachedFiles.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {attachedFiles.map((file) => (
-                <div
-                  key={file.path}
-                  className="inline-flex items-center gap-1.5 px-2 py-1 bg-emerald-950/20 border border-emerald-800/30 rounded-md text-xs"
-                >
-                  <FileCode className="h-3 w-3 text-emerald-500" />
-                  <span className="text-emerald-300">{file.name}</span>
-                  <button
-                    onClick={() => removeAttachedFile(file.path)}
-                    className="hover:bg-emerald-900/30 rounded p-0.5 transition-colors"
-                  >
-                    <X className="h-2.5 w-2.5 text-emerald-500" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Attached Images */}
-          {attachedImages.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-2">
-              {attachedImages.map((image) => (
-                <div key={image.name} className="relative group inline-block">
-                  <img
-                    src={`data:${image.mimeType};base64,${image.base64}`}
-                    alt={image.name}
-                    className="h-16 w-16 object-cover rounded-lg border border-zinc-700/50"
-                  />
-                  <button
-                    onClick={() => removeAttachedImage(image.name)}
-                    className="absolute -top-1.5 -right-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                  >
-                    <X className="h-2.5 w-2.5 text-zinc-400" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Input with integrated controls */}
-          <div className="relative bg-zinc-900/50 border border-zinc-800/60 rounded-xl hover:border-zinc-700/80 focus-within:border-emerald-500/40 transition-colors">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              className="hidden"
-              onChange={handleImageUpload}
-            />
+      {/* Unified Input (no internal borders, one surface) */}
+      {/* Wrapper to add spacing from sidebar edges */}
+      <div className="px-3 pt-3 pb-4">
+        <div className="bg-zinc-900/50 border border-zinc-800/60 rounded-xl hover:border-zinc-700/80 focus-within:border-emerald-500/40 transition-colors flex flex-col">
+          <div className="flex flex-col">
             <textarea
               ref={inputRef}
-              rows={1}
+              rows={3}
               value={input}
               onChange={handleInputChange}
               onKeyDown={(e) => {
@@ -647,39 +596,49 @@ export function AIAgentPanel({
               }}
               placeholder="Ask anything..."
               disabled={isStreaming}
-              className="w-full bg-transparent px-4 py-3 pr-32 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none resize-none disabled:opacity-50 disabled:cursor-not-allowed scrollbar-thin"
-              style={{ minHeight: "44px", maxHeight: "200px" }}
+              className="w-full bg-transparent px-4 pt-4 pb-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none resize-none disabled:opacity-50 disabled:cursor-not-allowed scrollbar-thin"
+              style={{ minHeight: "96px", maxHeight: "200px" }}
             />
 
-            {/* Bottom right controls */}
-            <div className="absolute bottom-2 right-2 flex items-center gap-1">
-              {/* Attach button */}
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isStreaming}
-                className="h-7 w-7 rounded-lg hover:bg-zinc-800/80 flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed group"
-                title="Attach images"
-              >
-                <Paperclip className="h-3.5 w-3.5 text-zinc-500 group-hover:text-zinc-400" />
-              </button>
+            {/* Controls */}
+            <div className="flex items-center justify-between px-2 pb-2">
+              <div className="flex items-center gap-1.5">
+                {/* Attach button */}
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isStreaming}
+                  className="h-7 w-7 rounded-lg hover:bg-zinc-800/80 flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed group"
+                  title="Attach images"
+                >
+                  <Paperclip className="h-3.5 w-3.5 text-zinc-500 group-hover:text-zinc-400" />
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={handleImageUpload}
+                />
 
-              {/* Model Selector - Styled like reference */}
-              {favoriteModels.length > 0 && (
-                <div className="relative">
-                  <select
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    className="h-7 pl-2 pr-6 bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/50 rounded-lg text-[11px] text-zinc-400 font-medium appearance-none focus:outline-none focus:border-emerald-500/50 transition-colors cursor-pointer"
-                  >
-                    {favoriteModels.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.name}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-500 pointer-events-none" />
-                </div>
-              )}
+                {/* Model Selector */}
+                {favoriteModels.length > 0 && (
+                  <div className="relative">
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      className="h-7 pl-2 pr-6 bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/50 rounded-lg text-[11px] text-zinc-400 font-medium appearance-none focus:outline-none focus:border-emerald-500/50 transition-colors cursor-pointer"
+                    >
+                      {favoriteModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-500 pointer-events-none" />
+                  </div>
+                )}
+              </div>
 
               {/* Send button */}
               <button
@@ -695,26 +654,7 @@ export function AIAgentPanel({
               </button>
             </div>
           </div>
-
-          {/* Hint text */}
-          <div className="mt-1.5 px-1 text-[10px] text-zinc-600">
-            Press Enter to send, Shift+Enter for new line, @ to mention files
-          </div>
         </div>
-
-        {/* File Mention Picker - Portal to prevent layout shift */}
-        {showFilePicker &&
-          typeof document !== "undefined" &&
-          createPortal(
-            <FileMentionPicker
-              workspaceId={workspaceId}
-              onSelect={handleFileSelect}
-              onClose={() => setShowFilePicker(false)}
-              position={filePickerPosition}
-              searchQuery={mentionQuery}
-            />,
-            document.body
-          )}
       </div>
     </div>
   );

@@ -6,10 +6,8 @@ function getPaths() {
   const cwd = process.cwd();
   const isInKalpana = /[\\\/]kalpana$/.test(cwd);
   return {
-    context: isInKalpana
-      ? path.join(cwd, "container")
-      : path.join(cwd, "kalpana", "container"),
-    display: isInKalpana ? "container" : "kalpana/container",
+    context: path.join(cwd, "container"),
+    display: "container",
   };
 }
 

@@ -15,6 +15,7 @@ import {
   ChevronDown,
   ChevronUp,
   Bot,
+  Rocket,
 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "./ui/button";
@@ -38,6 +39,12 @@ export function Sidebar() {
       href: "/dashboard",
       icon: LayoutDashboard,
       active: pathname === "/dashboard",
+    },
+    {
+      name: "Deployments",
+      href: "/dashboard/deployments",
+      icon: Rocket,
+      active: pathname.startsWith("/dashboard/deployments"),
     },
     {
       name: "Agents",
@@ -166,23 +173,24 @@ export function Sidebar() {
               )}
             </div>
           )}
-          {collapsed && settingsItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.name}
-                onClick={() => router.push(item.href)}
-                className={`w-full flex items-center justify-center px-0 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  item.active
-                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                    : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-100"
-                }`}
-                title={item.name}
-              >
-                <Icon className="h-4 w-4 shrink-0" />
-              </button>
-            );
-          })}
+          {collapsed &&
+            settingsItems.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.name}
+                  onClick={() => router.push(item.href)}
+                  className={`w-full flex items-center justify-center px-0 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    item.active
+                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                      : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-100"
+                  }`}
+                  title={item.name}
+                >
+                  <Icon className="h-4 w-4 shrink-0" />
+                </button>
+              );
+            })}
         </div>
       </nav>
 
