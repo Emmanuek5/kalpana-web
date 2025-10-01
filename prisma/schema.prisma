@@ -29,6 +29,7 @@ model User {
   accounts            Account[]
   presets             Preset[]
   domains             Domain[]
+  agents              Agent[]
   
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
@@ -268,4 +269,56 @@ model Deployment {
   @@index([status])
   @@index([subdomain])
   @@index([domainId])
+}
+
+enum AgentStatus {
+  IDLE
+  CLONING
+  RUNNING
+  COMPLETED
+  ERROR
+  PUSHING
+}
+
+model Agent {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  task            String        // The task description given to agent
+  
+  // GitHub repository info
+  githubRepo      String        // Full repo name (e.g., "owner/repo")
+  sourceBranch    String        @default("main")
+  targetBranch    String        // Branch to push changes to
+  
+  // Container metadata
+  containerId     String?
+  agentPort       Int?
+  status          AgentStatus   @default(IDLE)
+  
+  // Execution data
+  toolCalls       String?       // JSON array of tool calls/messages
+  filesEdited     String?       // JSON array of edited files with diffs
+  errorMessage    String?
+  
+  // Conversation history - maintains context across runs
+  conversationHistory String?   // JSON array of messages (user + assistant)
+  
+  // Queue for additional instructions while running
+  instructionQueue String?      // JSON array of queued instructions
+  
+  // User relation
+  userId          String        @db.ObjectId
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Metadata
+  startedAt       DateTime?
+  completedAt     DateTime?
+  pushedAt        DateTime?     // When changes were pushed to GitHub
+  lastMessageAt   DateTime?     // Last interaction timestamp
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
 }
