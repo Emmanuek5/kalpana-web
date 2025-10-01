@@ -692,5 +692,317 @@ export function createAgentTools(
         }
       },
     }),
+
+    // ========== Enhanced File Tools ==========
+    readMultipleFiles: tool({
+      description:
+        "Read multiple files at once. More efficient than calling readFile multiple times. Returns content for all files.",
+      inputSchema: z.object({
+        paths: z
+          .array(z.string())
+          .describe("Array of file paths to read (relative to workspace root)"),
+      }),
+      execute: async ({ paths }) => {
+        try {
+          const results = await Promise.all(
+            paths.map(async (path) => {
+              try {
+                const content = await containerAPI.readFile(workspaceId, path);
+                return { path, success: true, content };
+              } catch (error: any) {
+                return { path, success: false, error: error.message };
+              }
+            })
+          );
+          return {
+            success: true,
+            files: results,
+            successCount: results.filter((r) => r.success).length,
+            totalCount: results.length,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+          };
+        }
+      },
+    }),
+
+    findFiles: tool({
+      description:
+        "Find files by name pattern using glob syntax. Very useful for discovering files. Examples: '*.ts' finds all TypeScript files, 'src/**/*.tsx' finds all TSX files in src directory, '**/test*.js' finds all test files.",
+      inputSchema: z.object({
+        pattern: z
+          .string()
+          .describe(
+            "Glob pattern to match (e.g., '*.ts', 'src/**/*.tsx', '**/test*.js')"
+          ),
+        maxResults: z
+          .number()
+          .optional()
+          .describe("Maximum number of results to return (default: 100)"),
+      }),
+      execute: async ({ pattern, maxResults = 100 }) => {
+        try {
+          const result = await containerAPI.runCommand(
+            workspaceId,
+            `find . -type f -name '${pattern}' 2>/dev/null | head -n ${maxResults}`
+          );
+          const files = result.stdout
+            .split("\n")
+            .filter((f) => f.trim())
+            .map((f) => f.replace("./", ""));
+          return {
+            success: true,
+            files,
+            count: files.length,
+            pattern,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+          };
+        }
+      },
+    }),
+
+    getFileInfo: tool({
+      description:
+        "Get detailed information about a file including size, last modified time, and line count. Useful for understanding file characteristics before reading.",
+      inputSchema: z.object({
+        path: z.string().describe("File path to inspect"),
+      }),
+      execute: async ({ path }) => {
+        try {
+          const [statResult, wcResult] = await Promise.all([
+            containerAPI.runCommand(workspaceId, `stat -c '%s %Y' "${path}"`),
+            containerAPI.runCommand(workspaceId, `wc -l "${path}" 2>/dev/null || echo "0"`),
+          ]);
+
+          const [size, mtime] = statResult.stdout.trim().split(" ");
+          const lines = parseInt(wcResult.stdout.trim().split(" ")[0]) || 0;
+
+          return {
+            success: true,
+            path,
+            size: parseInt(size),
+            sizeFormatted: `${(parseInt(size) / 1024).toFixed(2)} KB`,
+            lastModified: new Date(parseInt(mtime) * 1000).toISOString(),
+            lines,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+          };
+        }
+      },
+    }),
+
+    // ========== Advanced Git Tools ==========
+    gitBranch: tool({
+      description:
+        "List, create, or switch git branches. Essential for branch management.",
+      inputSchema: z.object({
+        action: z
+          .enum(["list", "create", "switch", "delete"])
+          .describe("Action to perform on branches"),
+        branchName: z
+          .string()
+          .optional()
+          .describe("Branch name (required for create/switch/delete)"),
+      }),
+      execute: async ({ action, branchName }) => {
+        try {
+          let command = "";
+          switch (action) {
+            case "list":
+              command = "git branch -a";
+              break;
+            case "create":
+              if (!branchName)
+                return { success: false, error: "Branch name required" };
+              command = `git checkout -b ${branchName}`;
+              break;
+            case "switch":
+              if (!branchName)
+                return { success: false, error: "Branch name required" };
+              command = `git checkout ${branchName}`;
+              break;
+            case "delete":
+              if (!branchName)
+                return { success: false, error: "Branch name required" };
+              command = `git branch -d ${branchName}`;
+              break;
+          }
+
+          const result = await containerAPI.runCommand(workspaceId, command);
+          return {
+            success: true,
+            action,
+            branchName,
+            output: result.stdout || result.stderr,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+          };
+        }
+      },
+    }),
+
+    gitStash: tool({
+      description:
+        "Stash or restore uncommitted changes. Useful for temporarily saving work.",
+      inputSchema: z.object({
+        action: z
+          .enum(["save", "list", "pop", "apply", "drop"])
+          .describe("Stash action to perform"),
+        message: z
+          .string()
+          .optional()
+          .describe("Message for stash save"),
+      }),
+      execute: async ({ action, message }) => {
+        try {
+          let command = "";
+          switch (action) {
+            case "save":
+              command = message
+                ? `git stash save "${message}"`
+                : "git stash save";
+              break;
+            case "list":
+              command = "git stash list";
+              break;
+            case "pop":
+              command = "git stash pop";
+              break;
+            case "apply":
+              command = "git stash apply";
+              break;
+            case "drop":
+              command = "git stash drop";
+              break;
+          }
+
+          const result = await containerAPI.runCommand(workspaceId, command);
+          return {
+            success: true,
+            action,
+            output: result.stdout || result.stderr,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+          };
+        }
+      },
+    }),
+
+    // ========== Package Management Tools ==========
+    installPackages: tool({
+      description:
+        "Install npm/yarn/pnpm packages. Automatically detects package manager from lock files.",
+      inputSchema: z.object({
+        packages: z
+          .array(z.string())
+          .describe("Package names to install (e.g., ['react', 'lodash'])"),
+        dev: z
+          .boolean()
+          .optional()
+          .describe("Install as dev dependencies"),
+      }),
+      execute: async ({ packages, dev = false }) => {
+        try {
+          // Detect package manager
+          const detectResult = await containerAPI.runCommand(
+            workspaceId,
+            "ls package-lock.json yarn.lock pnpm-lock.yaml bun.lockb 2>/dev/null || echo 'npm'"
+          );
+
+          let packageManager = "npm";
+          let installCmd = "";
+
+          if (detectResult.stdout.includes("yarn.lock")) {
+            packageManager = "yarn";
+            installCmd = dev
+              ? `yarn add -D ${packages.join(" ")}`
+              : `yarn add ${packages.join(" ")}`;
+          } else if (detectResult.stdout.includes("pnpm-lock.yaml")) {
+            packageManager = "pnpm";
+            installCmd = dev
+              ? `pnpm add -D ${packages.join(" ")}`
+              : `pnpm add ${packages.join(" ")}`;
+          } else if (detectResult.stdout.includes("bun.lockb")) {
+            packageManager = "bun";
+            installCmd = dev
+              ? `bun add -d ${packages.join(" ")}`
+              : `bun add ${packages.join(" ")}`;
+          } else {
+            packageManager = "npm";
+            installCmd = dev
+              ? `npm install --save-dev ${packages.join(" ")}`
+              : `npm install ${packages.join(" ")}`;
+          }
+
+          const result = await containerAPI.runCommand(
+            workspaceId,
+            installCmd
+          );
+
+          return {
+            success: true,
+            packageManager,
+            packages,
+            dev,
+            output: result.stdout,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+          };
+        }
+      },
+    }),
+
+    runTests: tool({
+      description:
+        "Run tests using the project's test runner (npm test, yarn test, etc.). Useful for verifying changes.",
+      inputSchema: z.object({
+        testPattern: z
+          .string()
+          .optional()
+          .describe("Optional test file pattern or specific test to run"),
+      }),
+      execute: async ({ testPattern }) => {
+        try {
+          const command = testPattern
+            ? `npm test -- ${testPattern}`
+            : "npm test";
+
+          const result = await containerAPI.runCommand(workspaceId, command);
+
+          return {
+            success: true,
+            output: result.stdout,
+            errors: result.stderr,
+            testPattern,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+            output: error.stdout || "",
+            errors: error.stderr || "",
+          };
+        }
+      },
+    }),
   };
 }

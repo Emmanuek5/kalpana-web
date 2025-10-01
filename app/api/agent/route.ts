@@ -82,46 +82,121 @@ export async function POST(req: NextRequest) {
     }
 
     const systemPrompt = getSystemPrompt(workspace);
-    const result = streamText({
-      model: openrouterClient(selectedModel),
-      messages: transformedMessages,
-      system: systemPrompt,
-      tools,
-      stopWhen: stepCountIs(10), // Enable multi-step calls - continue after tool execution
-      onChunk: (event: any) => {
+    
+    // Create custom SSE stream for better control
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
         try {
-          const t = String(event?.type || "");
-          const isReasoning =
-            t.includes("reasoning") || event?.part?.type === "reasoning";
+          const result = streamText({
+            model: openrouterClient(selectedModel),
+            messages: transformedMessages,
+            system: systemPrompt,
+            tools,
+            stopWhen: stepCountIs(10),
+            onStepFinish: ({ toolCalls, toolResults, text }) => {
+              // Send tool calls in real-time
+              for (const toolCall of toolCalls) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "tool-call",
+                      toolCallId: toolCall.toolCallId,
+                      toolName: toolCall.toolName,
+                      args: (toolCall as any).args,
+                    })}\n\n`
+                  )
+                );
+              }
 
-          if (!isReasoning) return;
+              // Send tool results in real-time
+              for (let i = 0; i < toolResults.length; i++) {
+                const toolResult = toolResults[i];
+                const toolCall = toolCalls[i];
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "tool-result",
+                      toolCallId: toolCall.toolCallId,
+                      toolName: toolCall.toolName,
+                      result: (toolResult as any).result,
+                    })}\n\n`
+                  )
+                );
+              }
+            },
+            onChunk: (event: any) => {
+              try {
+                const t = String(event?.type || "");
+                const isReasoning =
+                  t.includes("reasoning") || event?.part?.type === "reasoning";
 
-          const candidates: unknown[] = [
-            event?.delta,
-            event?.text,
-            event?.content,
-            event?.reasoningDelta,
-            event?.reasoningText,
-            event?.part?.text,
-            event?.part?.content,
-            event?.delta?.text,
-            event?.delta?.content,
-          ];
+                if (!isReasoning) return;
 
-          for (const c of candidates) {
-            if (typeof c === "string" && c) {
-              reasoningCollected += c;
-              return;
-            }
+                const candidates: unknown[] = [
+                  event?.delta,
+                  event?.text,
+                  event?.content,
+                  event?.reasoningDelta,
+                  event?.reasoningText,
+                  event?.part?.text,
+                  event?.part?.content,
+                  event?.delta?.text,
+                  event?.delta?.content,
+                ];
+
+                for (const c of candidates) {
+                  if (typeof c === "string" && c) {
+                    reasoningCollected += c;
+                    return;
+                  }
+                }
+              } catch {}
+            },
+          });
+
+          // Stream text chunks
+          for await (const textChunk of result.textStream) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ type: "text-delta", textDelta: textChunk })}\n\n`)
+            );
           }
-        } catch {}
+
+          // Send reasoning if collected
+          if (reasoningCollected) {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  type: "reasoning-delta",
+                  reasoningDelta: reasoningCollected,
+                })}\n\n`
+              )
+            );
+          }
+
+          // Send finish event
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ type: "finish" })}\n\n`)
+          );
+
+          controller.close();
+        } catch (error: any) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`
+            )
+          );
+          controller.close();
+        }
       },
     });
 
-    // Return UI message stream response with reasoning enabled
-    return result.toUIMessageStreamResponse({
-      sendReasoning: true,
-      sendSources: true,
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
     });
   } catch (error) {
     console.error("AI agent error:", error);

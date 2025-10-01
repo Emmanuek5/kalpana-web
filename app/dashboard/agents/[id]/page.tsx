@@ -28,7 +28,7 @@ import {
   Brain,
 } from "lucide-react";
 import { useRouter, useParams } from "next/navigation";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -76,6 +76,13 @@ interface EditedFile {
   diff?: string;
 }
 
+// Timeline item - unifies messages and tool calls for proper ordering
+interface TimelineItem {
+  type: "message" | "tool-call";
+  timestamp: string;
+  data: ConversationMessage | ToolCall;
+}
+
 const TOOL_ICONS: Record<string, React.ComponentType<any>> = {
   listFiles: TerminalIcon,
   readFile: FileCode,
@@ -119,17 +126,45 @@ export default function AgentDetailPage() {
   const [chatMessage, setChatMessage] = useState("");
   const [sendingChat, setSendingChat] = useState(false);
   const [resuming, setResuming] = useState(false);
-  const [liveMessages, setLiveMessages] = useState<
-    Array<{ role: "user" | "assistant"; content: string; timestamp: string }>
-  >([]);
-  const [liveToolCalls, setLiveToolCalls] = useState<ToolCall[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [isLiveStreaming, setIsLiveStreaming] = useState(false);
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
 
+  // Ref to track accumulated streaming text (avoids stale closure)
+  const streamingTextRef = useRef("");
+
   // Refs for auto-scrolling
   const activityEndRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Compute sorted timeline of messages and tool calls
+  const timeline = useMemo<TimelineItem[]>(() => {
+    const items: TimelineItem[] = [];
+
+    // Add all conversation messages
+    conversation.forEach((msg) => {
+      items.push({
+        type: "message",
+        timestamp: msg.timestamp,
+        data: msg,
+      });
+    });
+
+    // Add all tool calls
+    toolCalls.forEach((toolCall) => {
+      items.push({
+        type: "tool-call",
+        timestamp: toolCall.timestamp,
+        data: toolCall,
+      });
+    });
+
+    // Sort by timestamp (chronological order)
+    return items.sort(
+      (a, b) =>
+        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+  }, [conversation, toolCalls]);
 
   useEffect(() => {
     if (agentId) {
@@ -194,26 +229,37 @@ export default function AgentDetailPage() {
             break;
 
           case "message":
-            // Batch message updates to reduce re-renders
+            // Only add if it's truly a new message (not a duplicate from streaming)
             setConversation((prev) => {
+              // Check if message already exists (by timestamp and role)
               const exists = prev.some(
                 (msg) =>
                   msg.timestamp === data.message.timestamp &&
                   msg.role === data.message.role
               );
-              return exists ? prev : [...prev, data.message];
+
+              // Also check if we just added this from streaming (by content match)
+              const recentMessage = prev[prev.length - 1];
+              const isDuplicateStream =
+                recentMessage?.role === "assistant" &&
+                recentMessage?.content === data.message.content;
+
+              if (exists || isDuplicateStream) {
+                return prev;
+              }
+
+              return [...prev, data.message];
             });
+            streamingTextRef.current = ""; // Reset accumulator
             setStreamingText(""); // Clear streaming text when message completes
             break;
 
           case "streaming":
-            // Debounce streaming updates for smoother rendering
-            if (updateTimeout) {
-              clearTimeout(updateTimeout);
-            }
-            updateTimeout = setTimeout(() => {
-              setStreamingText(data.content);
-            }, 50); // 50ms debounce for smoother updates
+            // Accumulate streaming text chunks
+            streamingTextRef.current += data.content;
+
+            // Update immediately for real-time feel (no debounce)
+            setStreamingText(streamingTextRef.current);
             break;
 
           case "files":
@@ -231,11 +277,23 @@ export default function AgentDetailPage() {
 
           case "done":
             setIsLiveStreaming(false);
+
+            // If we have accumulated streaming text, add it as a message
+            if (streamingTextRef.current) {
+              const assistantMessage: ConversationMessage = {
+                role: "assistant",
+                content: streamingTextRef.current,
+                timestamp: new Date().toISOString(),
+              };
+              setConversation((prev) => [...prev, assistantMessage]);
+            }
+
+            streamingTextRef.current = ""; // Reset accumulator
             setStreamingText("");
             if (updateTimeout) {
               clearTimeout(updateTimeout);
             }
-            fetchAgent(); // Fetch final state
+            // Don't fetch - we already have all data from streaming!
             break;
 
           default:
@@ -253,10 +311,7 @@ export default function AgentDetailPage() {
       if (updateTimeout) {
         clearTimeout(updateTimeout);
       }
-
-      // Fallback to polling if SSE fails
-      const interval = setInterval(fetchAgent, 3000);
-      return () => clearInterval(interval);
+      // Don't fallback to polling - just reconnect SSE or rely on manual refresh
     };
 
     // Cleanup on unmount
@@ -306,34 +361,39 @@ export default function AgentDetailPage() {
     // Stay on chat tab when sending
     setShowChat(true);
 
+    // Optimistically add user message to conversation
+    const userMessage: ConversationMessage = {
+      role: "user",
+      content: chatMessage,
+      timestamp: new Date().toISOString(),
+    };
+    setConversation((prev) => [...prev, userMessage]);
+
+    // Clear input immediately for better UX
+    const messageToSend = chatMessage;
+    setChatMessage("");
+
     try {
       const res = await fetch(`/api/agents/${agentId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: chatMessage }),
+        body: JSON.stringify({ message: messageToSend }),
       });
 
-      if (res.ok) {
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-        let assistantMessage = "";
-
-        if (reader) {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            assistantMessage += decoder.decode(value);
-          }
-        }
-
-        // Refresh to get updated conversation
-        setChatMessage("");
-        await fetchAgent();
-      } else {
+      if (!res.ok) {
+        // Remove optimistic message on error
+        setConversation((prev) =>
+          prev.filter((msg) => msg.timestamp !== userMessage.timestamp)
+        );
         alert("Failed to send message");
       }
+      // SSE will handle the assistant's response
     } catch (error) {
       console.error("Error sending chat:", error);
+      // Remove optimistic message on error
+      setConversation((prev) =>
+        prev.filter((msg) => msg.timestamp !== userMessage.timestamp)
+      );
       alert("Failed to send message");
     } finally {
       setSendingChat(false);
@@ -347,22 +407,41 @@ export default function AgentDetailPage() {
     // Stay on chat tab when resuming
     setShowChat(true);
 
+    // Optimistically add user message to conversation
+    const userMessage: ConversationMessage = {
+      role: "user",
+      content: chatMessage,
+      timestamp: new Date().toISOString(),
+      type: "resume_task",
+    };
+    setConversation((prev) => [...prev, userMessage]);
+
+    // Clear input immediately for better UX
+    const messageToSend = chatMessage;
+    setChatMessage("");
+
     try {
       const res = await fetch(`/api/agents/${agentId}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ newTask: chatMessage }),
+        body: JSON.stringify({ newTask: messageToSend }),
       });
 
-      if (res.ok) {
-        setChatMessage("");
-        await fetchAgent();
-      } else {
+      if (!res.ok) {
+        // Remove optimistic message on error
+        setConversation((prev) =>
+          prev.filter((msg) => msg.timestamp !== userMessage.timestamp)
+        );
         const error = await res.json();
         alert(error.error || "Failed to resume agent");
       }
+      // SSE will handle the agent's response
     } catch (error) {
       console.error("Error resuming agent:", error);
+      // Remove optimistic message on error
+      setConversation((prev) =>
+        prev.filter((msg) => msg.timestamp !== userMessage.timestamp)
+      );
       alert("Failed to resume agent");
     } finally {
       setResuming(false);
@@ -381,8 +460,8 @@ export default function AgentDetailPage() {
       });
 
       if (res.ok) {
+        // Just clear the instruction - SSE will handle updates
         setInstruction("");
-        await fetchAgent();
       } else {
         alert("Failed to send instruction");
       }
@@ -404,6 +483,7 @@ export default function AgentDetailPage() {
       if (res.ok) {
         const data = await res.json();
         alert(`Successfully pushed to ${data.branch}`);
+        // Fetch agent once to update pushedAt status
         await fetchAgent();
       } else {
         const error = await res.json();
@@ -737,9 +817,7 @@ export default function AgentDetailPage() {
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto p-3">
-                {conversation.length === 0 &&
-                !streamingText &&
-                toolCalls.length === 0 ? (
+                {timeline.length === 0 && !streamingText ? (
                   <div className="h-full flex items-center justify-center">
                     <div className="text-center max-w-md">
                       <div className="mb-2 text-2xl">⚡</div>
@@ -749,219 +827,227 @@ export default function AgentDetailPage() {
                     </div>
                   </div>
                 ) : (
-                  <div className="max-w-3xl mx-auto space-y-4">
-                    {conversation.map((msg, idx) => (
-                      <div key={idx} className="space-y-3">
+                  <div className="max-w-3xl mx-auto space-y-2.5">
+                    {/* Render timeline items in chronological order */}
+                    {timeline.map((item, idx) => (
+                      <div key={`${item.type}-${idx}`} className="space-y-2">
                         {/* User Messages */}
-                        {msg.role === "user" && (
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-2 mb-2">
-                              <div className="h-5 w-5 rounded-md bg-zinc-800/50 flex items-center justify-center">
-                                <span className="text-[10px] text-zinc-400">
-                                  You
-                                </span>
+                        {item.type === "message" &&
+                          (item.data as ConversationMessage).role ===
+                            "user" && (
+                            <div className="space-y-1.5">
+                              <div className="flex items-center gap-2 mb-1">
+                                <div className="h-4 w-4 rounded-md bg-zinc-800/50 flex items-center justify-center">
+                                  <span className="text-[9px] text-zinc-400">
+                                    You
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="text-xs text-zinc-200 leading-relaxed">
+                                {(item.data as ConversationMessage).content}
                               </div>
                             </div>
-                            <div className="text-sm text-zinc-200 leading-loose">
-                              {msg.content}
-                            </div>
-                          </div>
-                        )}
+                          )}
 
                         {/* Assistant Messages */}
-                        {msg.role === "assistant" && (
-                          <div className="space-y-3">
-                            <div className="flex items-center gap-2 mb-1">
-                              <div className="h-5 w-5 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
-                                <Brain className="h-3 w-3 text-emerald-500" />
+                        {item.type === "message" &&
+                          (item.data as ConversationMessage).role ===
+                            "assistant" && (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-1.5 mb-1">
+                                <div className="h-4 w-4 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                                  <Brain className="h-2.5 w-2.5 text-emerald-500" />
+                                </div>
+                                <span className="text-[9px] text-zinc-500 font-medium">
+                                  Agent
+                                </span>
                               </div>
-                              <span className="text-[10px] text-zinc-500 font-medium">
-                                Agent
-                              </span>
-                            </div>
-                            <div className="text-sm text-zinc-300 prose prose-invert prose-sm max-w-none">
-                              <ReactMarkdown
-                                remarkPlugins={[remarkGfm]}
-                                rehypePlugins={[rehypeHighlight]}
-                                components={{
-                                  p: ({ children }) => (
-                                    <p className="mb-4 leading-relaxed">
-                                      {children}
-                                    </p>
-                                  ),
-                                  code: ({ inline, children, ...props }: any) =>
-                                    inline ? (
-                                      <code
-                                        className="px-1.5 py-0.5 bg-zinc-800/50 text-emerald-400 rounded text-xs font-mono"
-                                        {...props}
-                                      >
+                              <div className="text-xs text-zinc-300 prose prose-invert prose-xs max-w-none">
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkGfm]}
+                                  rehypePlugins={[rehypeHighlight]}
+                                  components={{
+                                    p: ({ children }) => (
+                                      <p className="mb-2 leading-relaxed">
                                         {children}
-                                      </code>
-                                    ) : (
-                                      <code
-                                        className="block bg-zinc-900/50 p-4 rounded-lg my-3 text-xs overflow-x-auto border border-zinc-800/30 font-mono"
-                                        {...props}
-                                      >
-                                        {children}
-                                      </code>
+                                      </p>
                                     ),
-                                  pre: ({ children }) => (
-                                    <pre className="bg-zinc-900/50 border border-zinc-800/30 rounded-lg p-4 my-3 overflow-x-auto">
-                                      {children}
-                                    </pre>
-                                  ),
-                                  ul: ({ children }) => (
-                                    <ul className="list-disc list-inside mb-4 space-y-1.5">
-                                      {children}
-                                    </ul>
-                                  ),
-                                  ol: ({ children }) => (
-                                    <ol className="list-decimal list-inside mb-4 space-y-1.5">
-                                      {children}
-                                    </ol>
-                                  ),
-                                  li: ({ children }) => (
-                                    <li className="text-zinc-400 leading-relaxed">
-                                      {children}
-                                    </li>
-                                  ),
-                                  h1: ({ children }) => (
-                                    <h1 className="text-lg font-bold text-zinc-100 mb-3 mt-5">
-                                      {children}
-                                    </h1>
-                                  ),
-                                  h2: ({ children }) => (
-                                    <h2 className="text-base font-semibold text-zinc-100 mb-3 mt-4">
-                                      {children}
-                                    </h2>
-                                  ),
-                                  h3: ({ children }) => (
-                                    <h3 className="text-sm font-semibold text-zinc-200 mb-2 mt-3">
-                                      {children}
-                                    </h3>
-                                  ),
-                                  blockquote: ({ children }) => (
-                                    <blockquote className="border-l-2 border-emerald-500/30 pl-4 py-2 my-3 text-zinc-400 italic">
-                                      {children}
-                                    </blockquote>
-                                  ),
-                                }}
-                              >
-                                {msg.content}
-                              </ReactMarkdown>
+                                    code: ({
+                                      inline,
+                                      children,
+                                      ...props
+                                    }: any) =>
+                                      inline ? (
+                                        <code
+                                          className="px-1 py-0.5 bg-zinc-800/50 text-emerald-400 rounded text-[11px] font-mono"
+                                          {...props}
+                                        >
+                                          {children}
+                                        </code>
+                                      ) : (
+                                        <code
+                                          className="block bg-zinc-900/50 p-2 rounded-lg my-2 text-[11px] overflow-x-auto border border-zinc-800/30 font-mono"
+                                          {...props}
+                                        >
+                                          {children}
+                                        </code>
+                                      ),
+                                    pre: ({ children }) => (
+                                      <pre className="bg-zinc-900/50 border border-zinc-800/30 rounded-lg p-2 my-2 overflow-x-auto">
+                                        {children}
+                                      </pre>
+                                    ),
+                                    ul: ({ children }) => (
+                                      <ul className="list-disc list-inside mb-2 space-y-1">
+                                        {children}
+                                      </ul>
+                                    ),
+                                    ol: ({ children }) => (
+                                      <ol className="list-decimal list-inside mb-2 space-y-1">
+                                        {children}
+                                      </ol>
+                                    ),
+                                    li: ({ children }) => (
+                                      <li className="text-zinc-400 leading-relaxed text-xs">
+                                        {children}
+                                      </li>
+                                    ),
+                                    h1: ({ children }) => (
+                                      <h1 className="text-sm font-bold text-zinc-100 mb-2 mt-3">
+                                        {children}
+                                      </h1>
+                                    ),
+                                    h2: ({ children }) => (
+                                      <h2 className="text-xs font-semibold text-zinc-100 mb-2 mt-2">
+                                        {children}
+                                      </h2>
+                                    ),
+                                    h3: ({ children }) => (
+                                      <h3 className="text-xs font-semibold text-zinc-200 mb-1 mt-2">
+                                        {children}
+                                      </h3>
+                                    ),
+                                    blockquote: ({ children }) => (
+                                      <blockquote className="border-l-2 border-emerald-500/30 pl-3 py-1 my-2 text-zinc-400 italic text-xs">
+                                        {children}
+                                      </blockquote>
+                                    ),
+                                  }}
+                                >
+                                  {(item.data as ConversationMessage).content}
+                                </ReactMarkdown>
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                          )}
 
-                    {/* Tool Calls */}
-                    {toolCalls.length > 0 && (
-                      <div className="space-y-3">
-                        {toolCalls.map((toolCall) => {
-                          const isExpanded = expandedTools.has(toolCall.id);
-                          const IconComponent =
-                            TOOL_ICONS[
-                              toolCall.function?.name || toolCall.type
-                            ] || TerminalIcon;
+                        {/* Tool Calls - now properly interleaved! */}
+                        {item.type === "tool-call" &&
+                          (() => {
+                            const toolCall = item.data as ToolCall;
+                            const isExpanded = expandedTools.has(toolCall.id);
+                            const IconComponent =
+                              TOOL_ICONS[
+                                toolCall.function?.name || toolCall.type
+                              ] || TerminalIcon;
 
-                          return (
-                            <div
-                              key={toolCall.id}
-                              className="group relative bg-zinc-900/30 border border-zinc-800/40 rounded-lg overflow-hidden hover:border-zinc-700/60 transition-colors"
-                            >
-                              <button
-                                onClick={() =>
-                                  setExpandedTools((prev) => {
-                                    const newSet = new Set(prev);
-                                    if (newSet.has(toolCall.id)) {
-                                      newSet.delete(toolCall.id);
-                                    } else {
-                                      newSet.add(toolCall.id);
-                                    }
-                                    return newSet;
-                                  })
-                                }
-                                className="w-full px-3 py-2 flex items-center gap-2.5 text-left"
-                              >
-                                <div className="h-5 w-5 rounded bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
-                                  <IconComponent className="h-3 w-3 text-emerald-500" />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <span className="text-xs font-medium text-zinc-400 block">
-                                    {(toolCall.function?.name || toolCall.type)
-                                      .replace(/([A-Z])/g, " $1")
-                                      .replace(/_/g, " ")
-                                      .trim()}
-                                  </span>
-                                  <span className="text-[10px] text-zinc-600 block mt-0.5">
-                                    {new Date(
-                                      toolCall.timestamp
-                                    ).toLocaleTimeString()}
-                                  </span>
-                                </div>
-                                <div className="flex items-center gap-2 shrink-0">
-                                  {isExpanded ? (
-                                    <ChevronUp className="h-3 w-3 text-zinc-600" />
-                                  ) : (
-                                    <ChevronDown className="h-3 w-3 text-zinc-600" />
-                                  )}
-                                </div>
-                              </button>
-                              {isExpanded && toolCall.function?.arguments && (
-                                <div className="px-3 pb-3 border-t border-zinc-800/30 bg-black/10">
-                                  <div className="mt-2">
-                                    <div className="text-[10px] font-semibold text-emerald-500/70 mb-1 tracking-wide">
-                                      ARGUMENTS
-                                    </div>
-                                    <div className="text-xs text-zinc-400 bg-zinc-950/50 border border-zinc-800/30 p-2 rounded overflow-auto max-h-40 font-mono">
-                                      {JSON.stringify(
-                                        JSON.parse(toolCall.function.arguments),
-                                        null,
-                                        2
-                                      )}
+                            return (
+                              <div className="group relative bg-zinc-900/30 border border-zinc-800/40 rounded-lg overflow-hidden hover:border-zinc-700/60 transition-colors">
+                                <button
+                                  onClick={() =>
+                                    setExpandedTools((prev) => {
+                                      const newSet = new Set(prev);
+                                      if (newSet.has(toolCall.id)) {
+                                        newSet.delete(toolCall.id);
+                                      } else {
+                                        newSet.add(toolCall.id);
+                                      }
+                                      return newSet;
+                                    })
+                                  }
+                                  className="w-full px-3 py-2 flex items-center gap-2.5 text-left"
+                                >
+                                  <div className="h-5 w-5 rounded bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                                    <IconComponent className="h-3 w-3 text-emerald-500" />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <span className="text-xs font-medium text-zinc-400 block">
+                                      {(
+                                        toolCall.function?.name || toolCall.type
+                                      )
+                                        .replace(/([A-Z])/g, " $1")
+                                        .replace(/_/g, " ")
+                                        .trim()}
+                                    </span>
+                                    <span className="text-[10px] text-zinc-600 block mt-0.5">
+                                      {new Date(
+                                        toolCall.timestamp
+                                      ).toLocaleTimeString()}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    {isExpanded ? (
+                                      <ChevronUp className="h-3 w-3 text-zinc-600" />
+                                    ) : (
+                                      <ChevronDown className="h-3 w-3 text-zinc-600" />
+                                    )}
+                                  </div>
+                                </button>
+                                {isExpanded && toolCall.function?.arguments && (
+                                  <div className="px-3 pb-3 border-t border-zinc-800/30 bg-black/10">
+                                    <div className="mt-2">
+                                      <div className="text-[10px] font-semibold text-emerald-500/70 mb-1 tracking-wide">
+                                        ARGUMENTS
+                                      </div>
+                                      <div className="text-xs text-zinc-400 bg-zinc-950/50 border border-zinc-800/30 p-2 rounded overflow-auto max-h-40 font-mono">
+                                        {JSON.stringify(
+                                          JSON.parse(
+                                            toolCall.function.arguments
+                                          ),
+                                          null,
+                                          2
+                                        )}
+                                      </div>
                                     </div>
                                   </div>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
+                                )}
+                              </div>
+                            );
+                          })()}
                       </div>
-                    )}
+                    ))}
 
                     {/* Show streaming message */}
                     {streamingText && (
                       <div className="space-y-2">
-                        <div className="flex items-center gap-2 mb-1">
-                          <div className="h-5 w-5 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
-                            <Brain className="h-3 w-3 text-emerald-500" />
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <div className="h-4 w-4 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                            <Brain className="h-2.5 w-2.5 text-emerald-500" />
                           </div>
-                          <span className="text-[10px] text-zinc-500 font-medium">
+                          <span className="text-[9px] text-zinc-500 font-medium">
                             Agent
                           </span>
                         </div>
-                        <div className="text-sm text-zinc-300 prose prose-invert prose-sm max-w-none">
+                        <div className="text-xs text-zinc-300 prose prose-invert prose-xs max-w-none">
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
                             rehypePlugins={[rehypeHighlight]}
                             components={{
                               p: ({ children }) => (
-                                <p className="mb-4 leading-relaxed">
+                                <p className="mb-2 leading-relaxed">
                                   {children}
                                 </p>
                               ),
                               code: ({ inline, children, ...props }: any) =>
                                 inline ? (
                                   <code
-                                    className="px-1.5 py-0.5 bg-zinc-800/50 text-emerald-400 rounded text-xs font-mono"
+                                    className="px-1 py-0.5 bg-zinc-800/50 text-emerald-400 rounded text-[11px] font-mono"
                                     {...props}
                                   >
                                     {children}
                                   </code>
                                 ) : (
                                   <code
-                                    className="block bg-zinc-900/50 p-4 rounded-lg my-3 text-xs overflow-x-auto border border-zinc-800/30 font-mono"
+                                    className="block bg-zinc-900/50 p-2 rounded-lg my-2 text-[11px] overflow-x-auto border border-zinc-800/30 font-mono"
                                     {...props}
                                   >
                                     {children}
@@ -972,8 +1058,8 @@ export default function AgentDetailPage() {
                             {streamingText}
                           </ReactMarkdown>
                         </div>
-                        <div className="flex items-center gap-2 text-zinc-600 text-xs">
-                          <Loader2 className="h-3 w-3 animate-spin" />
+                        <div className="flex items-center gap-1.5 text-zinc-600 text-[10px]">
+                          <Loader2 className="h-2.5 w-2.5 animate-spin" />
                           <span>Streaming...</span>
                         </div>
                       </div>

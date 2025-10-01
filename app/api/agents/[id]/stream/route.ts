@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
+import { agentRunner, AgentStreamEvent } from "@/lib/agents/agent-runner";
 
 // GET /api/agents/[id]/stream - Server-Sent Events endpoint
 export async function GET(
@@ -27,25 +28,11 @@ export async function GET(
       return new Response("Agent not found", { status: 404 });
     }
 
-    // Set up SSE headers
+    // Set up SSE headers with real-time event streaming
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        let lastUpdate = agent.lastMessageAt || agent.updatedAt;
-        let lastToolCallsCount = 0;
-        let lastConversationLength = 0;
-
-        // Parse initial state
-        try {
-          const toolCalls = agent.toolCalls ? JSON.parse(agent.toolCalls) : [];
-          const conversation = agent.conversationHistory
-            ? JSON.parse(agent.conversationHistory)
-            : [];
-          lastToolCallsCount = Array.isArray(toolCalls) ? toolCalls.length : 0;
-          lastConversationLength = conversation.length;
-        } catch (e) {
-          console.error("Error parsing initial agent state:", e);
-        }
+        console.log(`📡 [Stream API] Client connected for agent ${id}`);
 
         // Send initial state
         controller.enqueue(
@@ -53,167 +40,160 @@ export async function GET(
             `data: ${JSON.stringify({
               type: "init",
               status: agent.status,
-              lastUpdate: lastUpdate?.toISOString(),
+              timestamp: new Date().toISOString(),
             })}\n\n`
           )
         );
 
-        // Poll for updates every second
-        const interval = setInterval(async () => {
-          try {
-            const updatedAgent = await prisma.agent.findUnique({
-              where: { id },
-            });
-
-            if (!updatedAgent) {
-              controller.close();
-              clearInterval(interval);
-              return;
+        // Send existing data from database
+        try {
+          if (agent.toolCalls) {
+            const toolCalls = JSON.parse(agent.toolCalls);
+            if (Array.isArray(toolCalls)) {
+              for (const toolCall of toolCalls) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "tool-call",
+                      toolCall,
+                    })}\n\n`
+                  )
+                );
+              }
             }
+          }
 
-            // Check if status changed
-            if (updatedAgent.status !== agent.status) {
+          if (agent.conversationHistory) {
+            const conversation = JSON.parse(agent.conversationHistory);
+            if (Array.isArray(conversation)) {
+              for (const message of conversation) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "message",
+                      message,
+                    })}\n\n`
+                  )
+                );
+              }
+            }
+          }
+
+          if (agent.filesEdited) {
+            const filesEdited = JSON.parse(agent.filesEdited);
+            if (Array.isArray(filesEdited) && filesEdited.length > 0) {
               controller.enqueue(
                 encoder.encode(
                   `data: ${JSON.stringify({
-                    type: "status",
-                    status: updatedAgent.status,
-                    error: updatedAgent.errorMessage,
+                    type: "files",
+                    files: filesEdited,
                   })}\n\n`
                 )
               );
             }
+          }
+        } catch (e) {
+          console.error("Error sending initial agent state:", e);
+        }
 
-            // Check for new tool calls
-            if (updatedAgent.toolCalls) {
-              try {
-                const toolCalls = JSON.parse(updatedAgent.toolCalls);
-                const newToolCallsCount = Array.isArray(toolCalls)
-                  ? toolCalls.length
-                  : 0;
+        // Subscribe to real-time events from agent runner
+        const unsubscribe = agentRunner.subscribeToAgent(
+          id,
+          (event: AgentStreamEvent) => {
+            try {
+              console.log(`📨 [Stream API] Event for agent ${id}:`, event.type);
 
-                if (newToolCallsCount > lastToolCallsCount) {
-                  // Send new tool calls
-                  const newToolCalls = toolCalls.slice(lastToolCallsCount);
-                  for (const toolCall of newToolCalls) {
-                    controller.enqueue(
-                      encoder.encode(
-                        `data: ${JSON.stringify({
-                          type: "tool-call",
-                          toolCall,
-                        })}\n\n`
-                      )
-                    );
-                  }
-                  lastToolCallsCount = newToolCallsCount;
-                }
-              } catch (e) {
-                console.error("Error parsing tool calls:", e);
-              }
-            }
-
-            // Check for new conversation messages
-            if (updatedAgent.conversationHistory) {
-              try {
-                const conversation = JSON.parse(
-                  updatedAgent.conversationHistory
-                );
-                const newConversationLength = conversation.length;
-
-                if (newConversationLength > lastConversationLength) {
-                  // Send new messages
-                  const newMessages = conversation.slice(
-                    lastConversationLength
+              switch (event.type) {
+                case "text":
+                  // Stream text chunks in real-time
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "streaming",
+                        content: event.data.content,
+                      })}\n\n`
+                    )
                   );
-                  for (const message of newMessages) {
-                    controller.enqueue(
-                      encoder.encode(
-                        `data: ${JSON.stringify({
-                          type: "message",
-                          message,
-                        })}\n\n`
-                      )
-                    );
-                  }
-                  lastConversationLength = newConversationLength;
-                } else if (
-                  newConversationLength === lastConversationLength &&
-                  conversation.length > 0
-                ) {
-                  // Check if last message is still streaming (has streaming: true flag)
-                  const lastMessage = conversation[conversation.length - 1];
-                  if (
-                    lastMessage.streaming &&
-                    lastMessage.role === "assistant"
-                  ) {
-                    // Send streaming update
-                    controller.enqueue(
-                      encoder.encode(
-                        `data: ${JSON.stringify({
-                          type: "streaming",
-                          content: lastMessage.content,
-                        })}\n\n`
-                      )
-                    );
-                  }
-                }
-              } catch (e) {
-                console.error("Error parsing conversation:", e);
-              }
-            }
+                  break;
 
-            // Check for files edited
-            if (updatedAgent.filesEdited) {
-              try {
-                const filesEdited = JSON.parse(updatedAgent.filesEdited);
-                if (filesEdited.length > 0) {
+                case "tool-call":
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "tool-call",
+                        toolCall: event.data.toolCall,
+                      })}\n\n`
+                    )
+                  );
+                  break;
+
+                case "status":
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "status",
+                        status: event.data.status,
+                        error: event.data.error,
+                      })}\n\n`
+                    )
+                  );
+                  break;
+
+                case "files":
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
                         type: "files",
-                        files: filesEdited,
+                        files: event.data.files,
                       })}\n\n`
                     )
                   );
-                }
-              } catch (e) {
-                console.error("Error parsing files edited:", e);
+                  break;
+
+                case "done":
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "done",
+                        status: event.data.status,
+                        filesEdited: event.data.filesEdited,
+                        toolCallsCount: event.data.toolCallsCount,
+                      })}\n\n`
+                    )
+                  );
+                  // Close the stream when done
+                  setTimeout(() => {
+                    unsubscribe();
+                    controller.close();
+                  }, 100);
+                  break;
+
+                case "error":
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "error",
+                        error: event.data.error,
+                      })}\n\n`
+                    )
+                  );
+                  // Close the stream on error
+                  setTimeout(() => {
+                    unsubscribe();
+                    controller.close();
+                  }, 100);
+                  break;
               }
+            } catch (error) {
+              console.error("Error encoding SSE event:", error);
             }
-
-            // Update references
-            Object.assign(agent, updatedAgent);
-            if (updatedAgent.lastMessageAt) {
-              lastUpdate = updatedAgent.lastMessageAt;
-            }
-
-            // Stop streaming if agent completed or errored
-            if (
-              updatedAgent.status === "COMPLETED" ||
-              updatedAgent.status === "ERROR"
-            ) {
-              controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify({
-                    type: "done",
-                    status: updatedAgent.status,
-                    error: updatedAgent.errorMessage,
-                  })}\n\n`
-                )
-              );
-              controller.close();
-              clearInterval(interval);
-            }
-          } catch (error) {
-            console.error("Error in SSE stream:", error);
-            controller.error(error);
-            clearInterval(interval);
           }
-        }, 300); // Check every 300ms for smoother streaming
+        );
 
         // Clean up on client disconnect
         req.signal.addEventListener("abort", () => {
-          clearInterval(interval);
+          console.log(`🔌 [Stream API] Client disconnected for agent ${id}`);
+          unsubscribe();
           controller.close();
         });
       },

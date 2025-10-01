@@ -580,20 +580,22 @@ export default function WorkspacePage({
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
+        const chunk = decoder.decode(value, { stream: true });
         const lines = chunk.split("\n");
 
         for (const line of lines) {
+          if (!line.trim() || line.startsWith(":")) continue;
+          
           if (line.startsWith("data: ")) {
-            const dataStr = line.slice(6);
-            if (dataStr === "[DONE]") continue;
+            const dataStr = line.slice(6).trim();
+            if (dataStr === "[DONE]" || !dataStr) continue;
 
             try {
               const data = JSON.parse(dataStr);
 
-              // Handle text deltas
-              if (data.type === "text-delta" && data.delta) {
-                currentText += data.delta;
+              // Handle text deltas (AI SDK v5 format)
+              if ((data.type === "text-delta" || data.type === "0") && data.textDelta) {
+                currentText += data.textDelta;
                 setMessages((prev) => {
                   const updated = [...prev];
                   const lastMsg = updated[updated.length - 1];
@@ -620,9 +622,9 @@ export default function WorkspacePage({
                 });
               }
 
-              // Handle reasoning deltas
-              if (data.type === "reasoning-delta" && data.delta) {
-                currentReasoning += data.delta;
+              // Handle reasoning deltas (AI SDK v5 format)
+              if (data.type === "reasoning-delta" && data.reasoningDelta) {
+                currentReasoning += data.reasoningDelta;
                 setMessages((prev) => {
                   const updated = [...prev];
                   const lastMsg = updated[updated.length - 1];
@@ -644,8 +646,8 @@ export default function WorkspacePage({
                 });
               }
 
-              // Handle tool input start (AI SDK v5)
-              if (data.type === "tool-input-start") {
+              // Handle tool calls (AI SDK v5 format - type "9" is tool-call)
+              if (data.type === "tool-call" || data.type === "9") {
                 // Reset text tracking - next text delta should create a new text part AFTER this tool
                 currentText = "";
                 currentTextPartIndex = -1;
@@ -666,8 +668,8 @@ export default function WorkspacePage({
                         type: "tool",
                         toolCallId: data.toolCallId,
                         toolName: data.toolName,
-                        state: "input-streaming",
-                        input: {},
+                        state: "input-available",
+                        input: data.args || {},
                       });
                     }
                   }
@@ -675,8 +677,8 @@ export default function WorkspacePage({
                 });
               }
 
-              // Handle tool input available (AI SDK v5)
-              if (data.type === "tool-input-available") {
+              // Handle tool results (AI SDK v5 format - type "a" is tool-result)
+              if (data.type === "tool-result" || data.type === "a") {
                 // Reset text tracking - next text delta should create a new text part AFTER this tool
                 currentText = "";
                 currentTextPartIndex = -1;
@@ -691,39 +693,10 @@ export default function WorkspacePage({
                         (p as any).toolCallId === data.toolCallId
                     );
                     if (toolPart) {
-                      toolPart.state = "input-available";
-                      toolPart.input = data.input;
-                    } else if (data.toolCallId && data.toolName) {
-                      // Tool doesn't exist, create it
-                      lastMsg.parts.push({
-                        type: "tool",
-                        toolCallId: data.toolCallId,
-                        toolName: data.toolName,
-                        state: "input-available",
-                        input: data.input,
-                      });
-                    }
-                  }
-                  return updated;
-                });
-              }
-
-              // Handle tool output available (AI SDK v5)
-              if (data.type === "tool-output-available") {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const lastMsg = updated[updated.length - 1];
-                  if (lastMsg.role === "assistant") {
-                    const toolPart = lastMsg.parts.find(
-                      (p): p is Extract<MessagePart, { type: "tool" }> =>
-                        p.type === "tool" &&
-                        (p as any).toolCallId === data.toolCallId
-                    );
-                    if (toolPart) {
                       toolPart.state = "output-available";
-                      toolPart.output = data.output;
+                      toolPart.output = data.result;
 
-                      // Add checkpoint for successful operations (only if not already added)
+                      // Add checkpoint for successful operations
                       const checkpointExists = lastMsg.parts.some(
                         (p) =>
                           p.type === "checkpoint" &&
@@ -739,48 +712,29 @@ export default function WorkspacePage({
                           )} completed`,
                           description: getToolDescription(
                             toolPart.toolName,
-                            data.output
+                            data.result
                           ),
                           status: "success",
                         });
                       }
+                    } else if (data.toolCallId && data.toolName) {
+                      // Tool doesn't exist, create it with result
+                      lastMsg.parts.push({
+                        type: "tool",
+                        toolCallId: data.toolCallId,
+                        toolName: data.toolName,
+                        state: "output-available",
+                        input: data.args || {},
+                        output: data.result,
+                      });
                     }
                   }
                   return updated;
                 });
               }
 
-              // Handle sources/citations
-              if (data.type === "source" && data.url) {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const lastMsg = updated[updated.length - 1];
-                  if (lastMsg.role === "assistant") {
-                    lastMsg.parts.push({
-                      type: "source",
-                      url: data.url,
-                      title: data.title,
-                      content: data.content,
-                    });
-                  }
-                  return updated;
-                });
-              }
-
-              // Handle step transitions
-              if (data.type === "finish-step") {
-                // Don't reset accumulators - just mark the step boundary
-                // Text will continue accumulating across steps if needed
-              }
-
-              // Handle new step start - reset for fresh content
-              if (data.type === "start-step") {
-                currentText = "";
-                currentReasoning = "";
-              }
-
-              // Handle stream finish
-              if (data.type === "finish") {
+              // Handle message finish (AI SDK v5 format)
+              if (data.type === "finish" || data.type === "message-stop") {
                 setIsStreaming(false);
                 // Save assistant message to database
                 setMessages((prev) => {
@@ -789,6 +743,25 @@ export default function WorkspacePage({
                     saveMessage(lastMsg);
                   }
                   return prev;
+                });
+              }
+
+              // Handle error events
+              if (data.type === "error") {
+                console.error("Stream error:", data.error);
+                setIsStreaming(false);
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const lastMsg = updated[updated.length - 1];
+                  if (lastMsg && lastMsg.role === "assistant") {
+                    lastMsg.parts.push({
+                      type: "checkpoint",
+                      title: "Error occurred",
+                      description: data.error || "An error occurred during processing",
+                      status: "error",
+                    });
+                  }
+                  return updated;
                 });
               }
             } catch (e) {

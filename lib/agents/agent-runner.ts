@@ -5,6 +5,7 @@ import { Octokit } from "@octokit/rest";
 import Docker from "dockerode";
 import path from "path";
 import fs from "fs";
+import { EventEmitter } from "events";
 
 /**
  * Agent Runner - Manages execution of autonomous coding agents
@@ -31,12 +32,23 @@ interface EditedFile {
   diff: string;
 }
 
+export interface AgentStreamEvent {
+  type: "text" | "tool-call" | "status" | "files" | "done" | "error";
+  agentId: string;
+  data?: any;
+  timestamp: string;
+}
+
 class AgentRunner {
   private docker: Docker;
   private portManager: PortManager;
   private runningAgents: Map<string, boolean> = new Map();
+  private eventEmitter: EventEmitter = new EventEmitter();
 
+  // Increase max listeners to handle multiple concurrent streams
   constructor() {
+    this.eventEmitter.setMaxListeners(100);
+
     const envHost = process.env.DOCKER_HOST;
 
     if (envHost && envHost.length > 0) {
@@ -71,6 +83,44 @@ class AgentRunner {
     }
 
     this.portManager = new PortManager();
+  }
+
+  /**
+   * Subscribe to real-time agent events for streaming
+   */
+  subscribeToAgent(
+    agentId: string,
+    callback: (event: AgentStreamEvent) => void
+  ): () => void {
+    const listener = (event: AgentStreamEvent) => {
+      if (event.agentId === agentId) {
+        callback(event);
+      }
+    };
+
+    this.eventEmitter.on("agent-event", listener);
+
+    // Return unsubscribe function
+    return () => {
+      this.eventEmitter.off("agent-event", listener);
+    };
+  }
+
+  /**
+   * Emit an agent event for real-time streaming
+   */
+  private emitAgentEvent(
+    agentId: string,
+    type: AgentStreamEvent["type"],
+    data?: any
+  ): void {
+    const event: AgentStreamEvent = {
+      type,
+      agentId,
+      data,
+      timestamp: new Date().toISOString(),
+    };
+    this.eventEmitter.emit("agent-event", event);
   }
 
   private getDefaultDockerClient(): Docker {
@@ -159,7 +209,7 @@ class AgentRunner {
             githubToken,
             agentPort,
             openrouterApiKey,
-            agent.model,
+            (agent as any).model || "anthropic/claude-3.5-sonnet",
             user?.name || undefined,
             user?.email || undefined
           );
@@ -210,7 +260,10 @@ class AgentRunner {
         },
       });
 
-      // Execute agent task with context (streams to database)
+      // Emit status change event
+      this.emitAgentEvent(agentId, "status", { status: "RUNNING" });
+
+      // Execute agent task with context (streams to database and real-time)
       await this.executeAgentTask(
         agentId,
         containerId,
@@ -231,6 +284,9 @@ class AgentRunner {
           errorMessage: error.message,
         },
       });
+
+      // Emit error event
+      this.emitAgentEvent(agentId, "error", { error: error.message });
 
       // Release the allocated port
       await this.portManager.releaseAgentPort(agentId);
@@ -281,6 +337,9 @@ class AgentRunner {
         },
       });
 
+      // Emit status change event
+      this.emitAgentEvent(agentId, "status", { status: "RUNNING" });
+
       // Execute agent task with full conversation context (no container recreation!)
       await this.executeAgentTask(
         agentId,
@@ -302,6 +361,9 @@ class AgentRunner {
           errorMessage: error.message,
         },
       });
+
+      // Emit error event
+      this.emitAgentEvent(agentId, "error", { error: error.message });
 
       this.runningAgents.delete(agentId);
     }
@@ -533,7 +595,7 @@ class AgentRunner {
     const requestBody = {
       task,
       apiKey: openrouterApiKey,
-      model: agent.model,
+      model: (agent as any).model || "anthropic/claude-3.5-sonnet",
       conversationHistory: conversationHistory.filter(
         (msg) => msg.role === "user" || msg.role === "assistant"
       ),
@@ -543,7 +605,7 @@ class AgentRunner {
     console.log(
       `   Task: ${task.substring(0, 100)}${task.length > 100 ? "..." : ""}`
     );
-    console.log(`   Model: ${agent.model}`);
+    console.log(`   Model: ${(agent as any).model}`);
     console.log(
       `   Conversation history: ${
         conversationHistory.filter(
@@ -601,6 +663,10 @@ class AgentRunner {
 
               if (data.type === "text") {
                 fullResponse += data.content;
+
+                // Emit text chunk in real-time
+                this.emitAgentEvent(agentId, "text", { content: data.content });
+
                 // Don't log every tiny chunk, just show we're receiving
                 if (fullResponse.length % 500 === 0) {
                   console.log(
@@ -635,7 +701,7 @@ class AgentRunner {
                 }
               } else if (data.type === "tool-call") {
                 // Collect tool call information for display
-                toolCallsCollected.push({
+                const toolCall = {
                   id: data.toolCallId || Date.now().toString(),
                   type: "function",
                   function: {
@@ -643,8 +709,14 @@ class AgentRunner {
                     arguments: JSON.stringify(data.args || {}),
                   },
                   timestamp: new Date().toISOString(),
-                });
+                };
+
+                toolCallsCollected.push(toolCall);
                 console.log(`🔧 Tool called: ${data.toolName}`);
+                console.log(`   Arguments:`, data.args);
+
+                // Emit tool call event in real-time
+                this.emitAgentEvent(agentId, "tool-call", { toolCall });
 
                 // Save tool calls immediately
                 await prisma.agent.update({
@@ -678,6 +750,13 @@ class AgentRunner {
                   timestamp: new Date().toISOString(),
                 });
 
+                // Emit files edited event
+                if (data.state?.filesEdited?.length > 0) {
+                  this.emitAgentEvent(agentId, "files", {
+                    files: data.state.filesEdited,
+                  });
+                }
+
                 // Update agent in database with final results
                 await prisma.agent.update({
                   where: { id: agentId },
@@ -689,6 +768,13 @@ class AgentRunner {
                     completedAt: new Date(),
                     lastMessageAt: new Date(),
                   },
+                });
+
+                // Emit done event in real-time
+                this.emitAgentEvent(agentId, "done", {
+                  status: "COMPLETED",
+                  filesEdited: data.state?.filesEdited || [],
+                  toolCallsCount: toolCallsCollected.length,
                 });
               }
             } catch (e: any) {
@@ -718,6 +804,11 @@ class AgentRunner {
           errorMessage: error.message || "Unknown error occurred",
           lastMessageAt: new Date(),
         },
+      });
+
+      // Emit error event
+      this.emitAgentEvent(agentId, "error", {
+        error: error.message || "Unknown error occurred",
       });
 
       throw error;

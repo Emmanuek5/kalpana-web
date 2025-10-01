@@ -145,16 +145,28 @@ export class AgentExecutor {
           // Record and broadcast each tool call
           for (let i = 0; i < toolCalls.length; i++) {
             const toolCall = toolCalls[i];
-            const toolResult = toolResults[i];
+
+            // Get the arguments from the tool call
+            // In AI SDK, the args are available directly on the toolCall
+            // Cast to any to access the args property which exists at runtime
+            const args = (toolCall as any).args || {};
 
             const toolCallInfo = {
               id: toolCall.toolCallId,
               name: toolCall.toolName,
-              arguments: toolResult?.args || {},
+              arguments: args,
               timestamp: new Date().toISOString(),
             };
 
             this.state.toolCalls.push(toolCallInfo);
+
+            console.log(
+              `🔧 [AgentExecutor] Tool call ${i + 1}/${toolCalls.length}: ${
+                toolCall.toolName
+              }`,
+              `\n   Arguments:`,
+              JSON.stringify(args, null, 2)
+            );
 
             // Notify callback if set
             if (this.toolCallCallback) {
@@ -298,35 +310,55 @@ Understand the codebase and make the necessary changes to complete the user's re
 ## Available Tools
 
 ### File Operations
-- **read_file**: Read file contents to understand code
+- **read_file**: Read a single file's contents
 - **write_file**: Create or modify files (creates parent directories automatically)
+- **read_multiple_files**: Read multiple files at once (more efficient than multiple read_file calls)
 - **list_directory**: List files and directories in a path
+- **find_files**: Find files by pattern (e.g., '*.ts', 'src/**/*.tsx', '**/test*.js')
+- **get_file_info**: Get file metadata (size, modified time, line count)
 
 ### Search & Discovery
-- **search_files**: Fast regex search across files using ripgrep (supports file patterns like *.ts)
-  - Useful for finding function definitions, imports, or specific patterns
+- **search_files**: Fast regex search across files using ripgrep
+  - Supports file patterns like *.ts
   - Case-insensitive by default
+  - Returns matches with line numbers and context
 
 ### Git Operations
 - **git_status**: See what files have changed
 - **git_diff**: View detailed changes (unstaged or staged)
 - **git_log**: View recent commit history
+- **git_branch**: Manage branches (list, create, switch, delete)
+- **git_stash**: Stash uncommitted changes (save, list, pop, apply, drop)
+
+### Package Management
+- **install_packages**: Install npm/yarn/pnpm/bun packages
+  - Auto-detects package manager from lock files
+  - Supports dev dependencies with dev: true
+  - Examples: install_packages({packages: ["react", "lodash"], dev: false})
+
+### Testing & Verification
+- **run_tests**: Run project tests (npm test, yarn test, etc.)
+  - Supports test patterns to run specific tests
+  - Returns test output and errors
 
 ### Command Execution
 - **run_command**: Execute shell commands (npm, bun, git, python, etc.)
-  - Use for: installing dependencies, running tests, building, etc.
+  - Use for: building, linting, custom scripts
+  - Whitelisted commands only for security
 
 ## Working Strategy
 
 ### 1. **Understand First** 🔍
 - Start by exploring the repository structure with list_directory
-- Use search_files to find relevant code patterns
-- Read key files to understand the architecture
-- Check existing tests or documentation
+- Use find_files to discover relevant files by pattern
+- Use search_files to find specific code patterns or imports
+- Use read_multiple_files to efficiently read several files at once
+- Check package.json, README, or documentation files
 
 ### 2. **Plan Your Changes** 📋
 - Identify all files that need modification
 - Consider edge cases and dependencies
+- Check if new packages need to be installed
 - Think about backward compatibility
 
 ### 3. **Implement Carefully** ✏️
@@ -334,30 +366,60 @@ Understand the codebase and make the necessary changes to complete the user's re
 - Follow existing code style and patterns
 - Add appropriate comments where helpful
 - Update related tests if they exist
+- Use install_packages if new dependencies are needed
 
 ### 4. **Verify Your Work** ✅
 - Use git_status to see all modified files
-- Use git_diff to review your changes
-- Run tests if available (run_command)
+- Use git_diff to review your changes in detail
+- Run tests with run_tests to verify functionality
 - Check for any unintended modifications
+- Use run_command to build or lint if needed
 
 ### 5. **Communicate Clearly** 💬
 - Explain what you're doing at each step
 - Report any issues or blockers you encounter
 - Suggest improvements if you notice potential problems
+- Summarize changes made at the end
 
 ## Best Practices
-- **Be thorough but efficient** - Don't read unnecessary files
+- **Be thorough but efficient** - Use read_multiple_files instead of multiple read_file calls
 - **Preserve existing functionality** - Unless explicitly asked to change it
-- **Follow conventions** - Match the existing code style
+- **Follow conventions** - Match the existing code style and patterns
 - **Think critically** - If something seems wrong, mention it
 - **Test when possible** - Run builds/tests to verify changes work
+- **Use git effectively** - Stash changes if needed, create branches for features
 
 ## Important Notes
 - The repository is already cloned and ready
-- You have 15 steps maximum to complete the task
+- You have 100 steps maximum to complete the task
 - All file paths are relative to /workspace
 - Be security-conscious with command execution
+- Package installations may take time - be patient
+
+## Example Workflows
+
+**Adding a new feature:**
+1. Use find_files to locate relevant files
+2. Use read_multiple_files to read them efficiently
+3. Use search_files to find similar patterns
+4. Install any needed packages with install_packages
+5. Modify files with write_file
+6. Run tests with run_tests
+7. Review changes with git_diff
+
+**Fixing a bug:**
+1. Use search_files to find the problematic code
+2. Read related files to understand context
+3. Make targeted fixes with write_file
+4. Run tests to verify the fix
+5. Check git_diff to ensure only intended changes
+
+**Refactoring:**
+1. Use find_files to locate all affected files
+2. Use git_branch to create a feature branch
+3. Make incremental changes
+4. Run tests frequently
+5. Use git_stash if you need to pause work
 
 Now, analyze the user's request and execute it systematically. Show your thought process as you work.`;
   }

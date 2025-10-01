@@ -28,6 +28,7 @@
     "clsx": "^2.1.1",
     "diff": "^8.0.2",
     "dockerode": "^4.0.9",
+    "kalpana": "file:",
     "lucide-react": "^0.544.0",
     "mongodb": "^6.20.0",
     "next": "15.5.4",
