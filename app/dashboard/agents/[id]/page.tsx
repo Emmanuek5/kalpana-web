@@ -18,6 +18,7 @@ import {
   MessageSquare,
   FileCode,
   Activity,
+  PlayCircle,
 } from "lucide-react";
 import { useRouter, useParams } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -34,7 +35,16 @@ interface Agent {
   toolCalls?: string;
   filesEdited?: string;
   instructionQueue?: string;
+  conversationHistory?: string;
   pushedAt?: string;
+  lastMessageAt?: string;
+}
+
+interface ConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+  type?: string;
 }
 
 interface ToolCall {
@@ -67,6 +77,11 @@ export default function AgentDetailPage() {
   const [instruction, setInstruction] = useState("");
   const [sending, setSending] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const [conversation, setConversation] = useState<ConversationMessage[]>([]);
+  const [showChat, setShowChat] = useState(false);
+  const [chatMessage, setChatMessage] = useState("");
+  const [sendingChat, setSendingChat] = useState(false);
+  const [resuming, setResuming] = useState(false);
 
   useEffect(() => {
     if (agentId) {
@@ -93,11 +108,79 @@ export default function AgentDetailPage() {
             setSelectedFile(files[0]);
           }
         }
+        if (data.conversationHistory) {
+          setConversation(JSON.parse(data.conversationHistory));
+        }
       }
     } catch (error) {
       console.error("Failed to fetch agent:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSendChat = async () => {
+    if (!chatMessage.trim()) return;
+
+    setSendingChat(true);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: chatMessage }),
+      });
+
+      if (res.ok) {
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let assistantMessage = "";
+
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            assistantMessage += decoder.decode(value);
+          }
+        }
+
+        // Refresh to get updated conversation
+        setChatMessage("");
+        await fetchAgent();
+      } else {
+        alert("Failed to send message");
+      }
+    } catch (error) {
+      console.error("Error sending chat:", error);
+      alert("Failed to send message");
+    } finally {
+      setSendingChat(false);
+    }
+  };
+
+  const handleResumeAgent = async () => {
+    if (!chatMessage.trim()) return;
+
+    setResuming(true);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newTask: chatMessage }),
+      });
+
+      if (res.ok) {
+        setChatMessage("");
+        setShowChat(false);
+        await fetchAgent();
+      } else {
+        const error = await res.json();
+        alert(error.error || "Failed to resume agent");
+      }
+    } catch (error) {
+      console.error("Error resuming agent:", error);
+      alert("Failed to resume agent");
+    } finally {
+      setResuming(false);
     }
   };
 
@@ -325,87 +408,232 @@ export default function AgentDetailPage() {
             )}
           </div>
 
-          {/* Right: Tool Calls & Messages */}
+          {/* Right: Tool Calls & Messages / Conversation */}
           <div className="w-96 flex flex-col">
             <div className="border-b border-zinc-800/50 px-4 py-3 bg-zinc-900/30">
-              <div className="flex items-center gap-2">
-                <Activity className="h-4 w-4 text-zinc-400" />
-                <h2 className="text-sm font-medium text-zinc-300">
-                  Activity Log
-                </h2>
+              <div className="flex items-center justify-between">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowChat(false)}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm ${
+                      !showChat
+                        ? "bg-zinc-800/50 text-zinc-100"
+                        : "text-zinc-500 hover:text-zinc-300"
+                    }`}
+                  >
+                    <Activity className="h-4 w-4" />
+                    Activity
+                  </button>
+                  <button
+                    onClick={() => setShowChat(true)}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm ${
+                      showChat
+                        ? "bg-zinc-800/50 text-zinc-100"
+                        : "text-zinc-500 hover:text-zinc-300"
+                    }`}
+                  >
+                    <MessageSquare className="h-4 w-4" />
+                    Chat ({conversation.length})
+                  </button>
+                </div>
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {toolCalls.length === 0 ? (
-                <p className="text-sm text-zinc-500">No activity yet</p>
-              ) : (
-                toolCalls.map((call, idx) => (
-                  <Card
-                    key={idx}
-                    className="p-3 bg-zinc-900/50 border-zinc-800/50"
-                  >
-                    <div className="flex items-start gap-2">
-                      <Activity className="h-4 w-4 text-emerald-400 mt-0.5" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-zinc-300">
-                          {call.function?.name || call.type}
-                        </p>
-                        {call.function?.arguments && (
-                          <pre className="mt-1 text-xs text-zinc-500 overflow-x-auto">
-                            {JSON.stringify(
-                              JSON.parse(call.function.arguments),
-                              null,
-                              2
-                            )}
-                          </pre>
-                        )}
-                        <p className="mt-1 text-xs text-zinc-600">
-                          {new Date(call.timestamp).toLocaleTimeString()}
-                        </p>
+            {!showChat ? (
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {toolCalls.length === 0 ? (
+                  <p className="text-sm text-zinc-500">No activity yet</p>
+                ) : (
+                  toolCalls.map((call, idx) => (
+                    <Card
+                      key={idx}
+                      className="p-3 bg-zinc-900/50 border-zinc-800/50"
+                    >
+                      <div className="flex items-start gap-2">
+                        <Activity className="h-4 w-4 text-emerald-400 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-medium text-zinc-300">
+                            {call.function?.name || call.type}
+                          </p>
+                          {call.function?.arguments && (
+                            <pre className="mt-1 text-xs text-zinc-500 overflow-x-auto">
+                              {JSON.stringify(
+                                JSON.parse(call.function.arguments),
+                                null,
+                                2
+                              )}
+                            </pre>
+                          )}
+                          <p className="mt-1 text-xs text-zinc-600">
+                            {new Date(call.timestamp).toLocaleTimeString()}
+                          </p>
+                        </div>
                       </div>
+                    </Card>
+                  ))
+                )}
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {conversation.length === 0 ? (
+                  <p className="text-sm text-zinc-500">
+                    No conversation yet. Chat with the agent to discuss its work
+                    or give it new instructions.
+                  </p>
+                ) : (
+                  conversation.map((msg, idx) => (
+                    <div
+                      key={idx}
+                      className={`flex ${
+                        msg.role === "user" ? "justify-end" : "justify-start"
+                      }`}
+                    >
+                      <Card
+                        className={`p-3 max-w-[85%] ${
+                          msg.role === "user"
+                            ? "bg-emerald-600/20 border-emerald-500/30"
+                            : "bg-zinc-900/50 border-zinc-800/50"
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          {msg.role === "assistant" && (
+                            <Bot className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" />
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs text-zinc-300 whitespace-pre-wrap">
+                              {msg.content}
+                            </p>
+                            <p className="mt-1 text-xs text-zinc-600">
+                              {new Date(msg.timestamp).toLocaleTimeString()}
+                            </p>
+                          </div>
+                        </div>
+                      </Card>
                     </div>
-                  </Card>
-                ))
-              )}
-            </div>
+                  ))
+                )}
+              </div>
+            )}
 
-            {/* Instruction Input */}
-            {agent.status === "RUNNING" && (
+            {/* Chat/Instruction Input */}
+            {showChat ? (
               <div className="border-t border-zinc-800/50 p-4 bg-zinc-900/30">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 mb-2">
                   <MessageSquare className="h-4 w-4 text-zinc-400" />
                   <p className="text-xs text-zinc-500">
-                    Send additional instructions
+                    {agent.status === "COMPLETED" || agent.status === "IDLE"
+                      ? "Resume with new task or ask questions"
+                      : "Chat with the agent"}
                   </p>
                 </div>
-                <div className="flex gap-2 mt-2">
+                <div className="space-y-2">
                   <Input
-                    value={instruction}
-                    onChange={(e) => setInstruction(e.target.value)}
-                    placeholder="Add to queue..."
+                    value={chatMessage}
+                    onChange={(e) => setChatMessage(e.target.value)}
+                    placeholder={
+                      agent.status === "COMPLETED" || agent.status === "IDLE"
+                        ? "Give agent a new task..."
+                        : "Send a message..."
+                    }
                     className="bg-zinc-800/50 border-zinc-700/50 text-sm"
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
-                        handleSendInstruction();
+                        if (
+                          agent.status === "COMPLETED" ||
+                          agent.status === "IDLE"
+                        ) {
+                          handleResumeAgent();
+                        } else {
+                          handleSendChat();
+                        }
                       }
                     }}
                   />
-                  <Button
-                    size="sm"
-                    onClick={handleSendInstruction}
-                    disabled={sending || !instruction.trim()}
-                    className="bg-emerald-600 text-white hover:bg-emerald-500"
-                  >
-                    {sending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Send className="h-4 w-4" />
+                  <div className="flex gap-2">
+                    {(agent.status === "COMPLETED" ||
+                      agent.status === "IDLE") && (
+                      <Button
+                        size="sm"
+                        onClick={handleResumeAgent}
+                        disabled={resuming || !chatMessage.trim()}
+                        className="flex-1 bg-purple-600 text-white hover:bg-purple-500"
+                      >
+                        {resuming ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            Resuming...
+                          </>
+                        ) : (
+                          <>
+                            <PlayCircle className="h-4 w-4 mr-2" />
+                            Resume Agent
+                          </>
+                        )}
+                      </Button>
                     )}
-                  </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleSendChat}
+                      disabled={sendingChat || !chatMessage.trim()}
+                      className={
+                        agent.status === "COMPLETED" || agent.status === "IDLE"
+                          ? "flex-1 bg-emerald-600 text-white hover:bg-emerald-500"
+                          : "flex-1 bg-emerald-600 text-white hover:bg-emerald-500"
+                      }
+                    >
+                      {sendingChat ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <>
+                          <Send className="h-4 w-4 mr-2" />
+                          {agent.status === "COMPLETED" ||
+                          agent.status === "IDLE"
+                            ? "Ask"
+                            : "Send"}
+                        </>
+                      )}
+                    </Button>
+                  </div>
                 </div>
               </div>
+            ) : (
+              agent.status === "RUNNING" && (
+                <div className="border-t border-zinc-800/50 p-4 bg-zinc-900/30">
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="h-4 w-4 text-zinc-400" />
+                    <p className="text-xs text-zinc-500">
+                      Send additional instructions
+                    </p>
+                  </div>
+                  <div className="flex gap-2 mt-2">
+                    <Input
+                      value={instruction}
+                      onChange={(e) => setInstruction(e.target.value)}
+                      placeholder="Add to queue..."
+                      className="bg-zinc-800/50 border-zinc-700/50 text-sm"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSendInstruction();
+                        }
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      onClick={handleSendInstruction}
+                      disabled={sending || !instruction.trim()}
+                      className="bg-emerald-600 text-white hover:bg-emerald-500"
+                    >
+                      {sending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Send className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )
             )}
           </div>
         </div>

@@ -96,6 +96,97 @@ class AgentRunner {
         throw new Error("Agent not found");
       }
 
+      // Initialize conversation history if not exists
+      const conversationHistory = agent.conversationHistory
+        ? JSON.parse(agent.conversationHistory)
+        : [];
+
+      // Add initial task to conversation if this is the first run
+      if (conversationHistory.length === 0) {
+        conversationHistory.push({
+          role: "user",
+          content: agent.task,
+          timestamp: new Date().toISOString(),
+          type: "initial_task",
+        });
+      }
+
+      // Update status to CLONING
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          status: "CLONING",
+          startedAt: new Date(),
+          conversationHistory: JSON.stringify(conversationHistory),
+        },
+      });
+
+      // Allocate port for agent communication
+      const { agentPort } = await this.portManager.allocatePorts();
+
+      // Create container and clone repo
+      const containerId = await this.createAgentContainer(
+        agentId,
+        agent.githubRepo,
+        agent.sourceBranch,
+        githubToken,
+        agentPort
+      );
+
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          containerId,
+          agentPort,
+          status: "RUNNING",
+        },
+      });
+
+      // Execute agent task with context
+      await this.executeAgentTask(agentId, containerId, conversationHistory);
+
+      this.runningAgents.delete(agentId);
+    } catch (error: any) {
+      console.error(`Agent ${agentId} error:`, error);
+
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          status: "ERROR",
+          errorMessage: error.message,
+        },
+      });
+
+      this.runningAgents.delete(agentId);
+    }
+  }
+
+  async resumeAgent(
+    agentId: string,
+    newTask: string,
+    githubToken: string
+  ): Promise<void> {
+    // Resume is similar to start, but maintains existing context
+    if (this.runningAgents.get(agentId)) {
+      throw new Error("Agent is already running");
+    }
+
+    this.runningAgents.set(agentId, true);
+
+    try {
+      const agent = await prisma.agent.findUnique({
+        where: { id: agentId },
+      });
+
+      if (!agent) {
+        throw new Error("Agent not found");
+      }
+
+      // Get existing conversation history
+      const conversationHistory = agent.conversationHistory
+        ? JSON.parse(agent.conversationHistory)
+        : [];
+
       // Update status to CLONING
       await prisma.agent.update({
         where: { id: agentId },
@@ -126,12 +217,12 @@ class AgentRunner {
         },
       });
 
-      // Execute agent task
-      await this.executeAgentTask(agentId, containerId);
+      // Execute agent task with full conversation context
+      await this.executeAgentTask(agentId, containerId, conversationHistory);
 
       this.runningAgents.delete(agentId);
     } catch (error: any) {
-      console.error(`Agent ${agentId} error:`, error);
+      console.error(`Agent ${agentId} resume error:`, error);
 
       await prisma.agent.update({
         where: { id: agentId },
@@ -260,7 +351,8 @@ class AgentRunner {
 
   private async executeAgentTask(
     agentId: string,
-    containerId: string
+    containerId: string,
+    conversationHistory: any[]
   ): Promise<void> {
     const agent = await prisma.agent.findUnique({
       where: { id: agentId },
@@ -309,26 +401,51 @@ class AgentRunner {
       content: string;
     }[];
 
-    // Here we would integrate with the AI agent
-    // For now, we'll simulate the process
+    // Get the latest task from conversation history
+    const latestUserMessage = [...conversationHistory]
+      .reverse()
+      .find((msg) => msg.role === "user");
+
+    const currentTask = latestUserMessage?.content || agent.task;
+
+    // Log task execution with context
     toolCalls.push({
-      id: "1",
+      id: Date.now().toString(),
       type: "function",
       function: {
-        name: "analyze_codebase",
-        arguments: JSON.stringify({ task: agent.task }),
+        name: "execute_with_context",
+        arguments: JSON.stringify({
+          currentTask,
+          previousMessages: conversationHistory.length,
+          filesAvailable: validFiles.length,
+        }),
       },
       timestamp: new Date().toISOString(),
     });
 
-    // TODO: Integrate actual AI agent execution
-    // This would use the agent-tools and execute the task
+    // TODO: Integrate actual AI agent execution with conversation context
+    // This would use the agent-tools and execute the task with full context
+    // The agent will have access to:
+    // - All previous conversation messages
+    // - Previously edited files
+    // - Current repository state
+
+    // Add assistant response to conversation
+    const assistantResponse = {
+      role: "assistant",
+      content: `Analyzing repository and executing task with context from ${conversationHistory.length} previous messages...`,
+      timestamp: new Date().toISOString(),
+      type: "execution",
+    };
+
+    conversationHistory.push(assistantResponse);
 
     await prisma.agent.update({
       where: { id: agentId },
       data: {
         toolCalls: JSON.stringify(toolCalls),
         filesEdited: JSON.stringify(filesEdited),
+        conversationHistory: JSON.stringify(conversationHistory),
         status: "COMPLETED",
         completedAt: new Date(),
       },

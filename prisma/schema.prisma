@@ -300,6 +300,9 @@ model Agent {
   filesEdited     String?       // JSON array of edited files with diffs
   errorMessage    String?
   
+  // Conversation history - maintains context across runs
+  conversationHistory String?   // JSON array of messages (user + assistant)
+  
   // Queue for additional instructions while running
   instructionQueue String?      // JSON array of queued instructions
   
@@ -311,6 +314,7 @@ model Agent {
   startedAt       DateTime?
   completedAt     DateTime?
   pushedAt        DateTime?     // When changes were pushed to GitHub
+  lastMessageAt   DateTime?     // Last interaction timestamp
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   
