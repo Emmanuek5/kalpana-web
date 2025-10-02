@@ -51,9 +51,15 @@ export async function GET(
         checkIndexCmd
       );
 
-      if (stdout) {
-        // Return cached index
-        return Response.json(JSON.parse(stdout));
+      if (stdout && stdout.trim()) {
+        try {
+          // Return cached index
+          const cachedIndex = JSON.parse(stdout.trim());
+          console.log(`📦 Using cached index: ${cachedIndex.stats?.totalFiles || 0} files`);
+          return Response.json(cachedIndex);
+        } catch (parseError) {
+          console.log("Cached index is corrupted, regenerating...");
+        }
       }
     } catch (error) {
       // Index doesn't exist or is stale, generate new one
@@ -65,27 +71,59 @@ export async function GET(
     const indexCmd = ["sh", "/index-codebase.sh", "/workspace"];
 
     try {
-      await dockerManager.execInContainer(workspace.containerId, indexCmd);
+      const { stdout: indexOutput, stderr: indexError } = await dockerManager.execInContainer(
+        workspace.containerId, 
+        indexCmd
+      );
+      
+      // Log any output from the indexing script
+      if (indexOutput) console.log("Index script output:", indexOutput);
+      if (indexError) console.log("Index script stderr:", indexError);
 
-      // Read the generated index
+      // Read the generated index file
       const readIndexCmd = ["cat", "/workspace/.kalpana/codebase-index.json"];
-      const { stdout } = await dockerManager.execInContainer(
+      const { stdout, stderr } = await dockerManager.execInContainer(
         workspace.containerId,
         readIndexCmd
       );
 
-      const index = JSON.parse(stdout);
+      if (!stdout || stdout.trim() === "") {
+        console.error("Index file is empty or missing, returning empty index");
+        return Response.json({
+          lastUpdated: new Date().toISOString(),
+          files: [],
+          symbols: { functions: [], classes: [], exports: [] },
+          stats: { totalFiles: 0, totalLines: 0 }
+        });
+      }
+
+      let index;
+      try {
+        index = JSON.parse(stdout.trim());
+      } catch (parseError: any) {
+        console.error("Failed to parse index JSON:", parseError.message);
+        console.error("Raw stdout:", stdout.substring(0, 500));
+        return Response.json({
+          lastUpdated: new Date().toISOString(),
+          files: [],
+          symbols: { functions: [], classes: [], exports: [] },
+          stats: { totalFiles: 0, totalLines: 0 }
+        });
+      }
+
       console.log(
-        `✅ Index generated: ${index.stats?.totalFiles || 0} files`
+        `✅ Index generated: ${index.stats?.totalFiles || 0} files, ${index.stats?.totalFunctions || 0} functions`
       );
 
       return Response.json(index);
     } catch (error: any) {
       console.error("Error generating index:", error);
-      return Response.json(
-        { error: "Failed to generate index", details: error.message },
-        { status: 500 }
-      );
+      return Response.json({
+        lastUpdated: new Date().toISOString(),
+        files: [],
+        symbols: { functions: [], classes: [], exports: [] },
+        stats: { totalFiles: 0, totalLines: 0 }
+      });
     }
   } catch (error: any) {
     console.error("Error fetching codebase index:", error);
@@ -129,7 +167,14 @@ export async function POST(
     // Force regenerate index
     const indexCmd = ["sh", "/index-codebase.sh", "/workspace"];
 
-    await dockerManager.execInContainer(workspace.containerId, indexCmd);
+    const { stdout: indexOutput, stderr: indexError } = await dockerManager.execInContainer(
+      workspace.containerId, 
+      indexCmd
+    );
+    
+    // Log any output from the indexing script
+    if (indexOutput) console.log("Index script output:", indexOutput);
+    if (indexError) console.log("Index script stderr:", indexError);
 
     // Read the generated index
     const readIndexCmd = ["cat", "/workspace/.kalpana/codebase-index.json"];
@@ -138,14 +183,23 @@ export async function POST(
       readIndexCmd
     );
 
-    const index = JSON.parse(stdout);
-    console.log(`✅ Index regenerated: ${index.stats?.totalFiles || 0} files`);
+    if (!stdout || stdout.trim() === "") {
+      console.error("Index file is empty or missing");
+      return Response.json(
+        { error: "Index file is empty or was not generated" },
+        { status: 500 }
+      );
+    }
+
+    const index = JSON.parse(stdout.trim());
+    console.log(`✅ Index regenerated: ${index.stats?.totalFiles || 0} files, ${index.stats?.totalFunctions || 0} functions`);
 
     return Response.json(index);
   } catch (error: any) {
     console.error("Error regenerating index:", error);
-    return new Response(error.message || "Failed to regenerate index", {
-      status: 500,
-    });
+    return Response.json(
+      { error: "Failed to regenerate index", details: error.message },
+      { status: 500 }
+    );
   }
 }

@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
       return new Response("Unauthorized", { status: 401 });
     }
 
-    const { messages, workspaceId, model, images } = await req.json();
+    const { messages, workspaceId, chatId, model, images } = await req.json();
 
     // Verify workspace belongs to user and get user settings
     const [workspace, user] = await Promise.all([
@@ -48,7 +48,6 @@ export async function POST(req: NextRequest) {
       await containerAPI.connect(workspaceId, workspace.agentPort);
     } catch (error) {
       // May already be connected
-      console.log("Agent bridge connection:", error);
     }
 
     // Use user's API key if available, otherwise use default
@@ -61,8 +60,15 @@ export async function POST(req: NextRequest) {
     // Create workspace-specific tools with the same API key and model
     const tools = createAgentTools(workspaceId, apiKey, selectedModel);
 
-    // Collect reasoning tokens
+    // Collect reasoning tokens and message parts
     let reasoningCollected = "";
+    let textCollected = "";
+    const toolCallsCollected: any[] = [];
+    const toolResultsCollected: any[] = [];
+    
+    // Track message IDs for progressive updates
+    let userMessageId: string | null = null;
+    let assistantMessageId: string | null = null;
 
     // Stream AI response with tools and multi-step support
     // Transform the last message to include images if provided
@@ -92,13 +98,15 @@ export async function POST(req: NextRequest) {
         codebaseIndex = await indexRes.json();
       }
     } catch (error) {
-      console.log("Codebase index not available:", error);
+      // Index not available
     }
 
     const systemPrompt = getSystemPrompt(workspace, codebaseIndex);
     
     // Create custom SSE stream for better control
     const encoder = new TextEncoder();
+    const abortController = new AbortController();
+    
     const stream = new ReadableStream({
       async start(controller) {
         try {
@@ -107,36 +115,82 @@ export async function POST(req: NextRequest) {
             messages: transformedMessages,
             system: systemPrompt,
             tools,
-            stopWhen: stepCountIs(10),
+            stopWhen: stepCountIs(20),
+            abortSignal: abortController.signal,
+            prepareStep: async ({ stepNumber, steps }) => {
+              // Return empty object to use default settings
+              return {};
+            },
             onStepFinish: ({ toolCalls, toolResults, text }) => {
-              // Send tool calls in real-time
-              for (const toolCall of toolCalls) {
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
-                      type: "tool-call",
-                      toolCallId: toolCall.toolCallId,
-                      toolName: toolCall.toolName,
-                      args: (toolCall as any).args,
-                    })}\n\n`
-                  )
-                );
+              // Send tool calls first (if any)
+              if (toolCalls && toolCalls.length > 0) {
+                for (const toolCall of toolCalls) {
+                  // Extract args - try multiple possible properties
+                  let toolArgs = (toolCall as any).args 
+                    || (toolCall as any).arguments 
+                    || (toolCall as any).input
+                    || (toolCall as any).parameters
+                    || {};
+                  
+                  // If toolArgs is still empty, check if the toolCall itself contains the args
+                  if (Object.keys(toolArgs).length === 0) {
+                    // Create a copy without known metadata fields
+                    const { toolCallId, toolName, type, ...possibleArgs } = toolCall as any;
+                    if (Object.keys(possibleArgs).length > 0) {
+                      toolArgs = possibleArgs;
+                    }
+                  }
+                  
+                  // Collect for database
+                  toolCallsCollected.push({
+                    toolCallId: toolCall.toolCallId,
+                    toolName: toolCall.toolName,
+                    args: toolArgs,
+                  });
+                  
+                  // Stream tool call to user
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "tool-call",
+                        toolCallId: toolCall.toolCallId,
+                        toolName: toolCall.toolName,
+                        args: toolArgs,
+                      })}\n\n`
+                    )
+                  );
+                }
               }
-
-              // Send tool results in real-time
-              for (let i = 0; i < toolResults.length; i++) {
-                const toolResult = toolResults[i];
-                const toolCall = toolCalls[i];
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
-                      type: "tool-result",
-                      toolCallId: toolCall.toolCallId,
-                      toolName: toolCall.toolName,
-                      result: (toolResult as any).result,
-                    })}\n\n`
-                  )
-                );
+              
+              // Send tool results after execution completes (if any)
+              if (toolResults && toolResults.length > 0) {
+                for (let i = 0; i < toolResults.length; i++) {
+                  const toolResult = toolResults[i];
+                  const toolCall = toolCalls[i];
+                  
+                  // Extract result - could be in result property or the object itself
+                  const resultData = (toolResult as any).result !== undefined 
+                    ? (toolResult as any).result 
+                    : toolResult;
+                  
+                  // Collect for database
+                  toolResultsCollected.push({
+                    toolCallId: toolCall.toolCallId,
+                    toolName: toolCall.toolName,
+                    result: resultData,
+                  });
+                  
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "tool-result",
+                        toolCallId: toolCall.toolCallId,
+                        toolName: toolCall.toolName,
+                        result: resultData,
+                      })}\n\n`
+                    )
+                  );
+                }
               }
             },
             onChunk: (event: any) => {
@@ -169,12 +223,40 @@ export async function POST(req: NextRequest) {
             },
           });
 
-          // Stream text chunks
+          // NOTE: Messages are already saved by the frontend before calling this API
+          // We don't need to create them again here to avoid duplicates
+
+          // Stream text chunks and update database periodically
+          let chunkCount = 0;
+          let lastDbUpdate = Date.now();
+          const DB_UPDATE_INTERVAL = 1000; // Update DB every 1 second
+          
           for await (const textChunk of result.textStream) {
+            chunkCount++;
+            textCollected += textChunk;
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify({ type: "text-delta", textDelta: textChunk })}\n\n`)
             );
+            
+            // Update database periodically during streaming
+            const now = Date.now();
+            if (now - lastDbUpdate > DB_UPDATE_INTERVAL && assistantMessageId) {
+              lastDbUpdate = now;
+              const currentParts = [
+                { type: "text", text: textCollected, status: "streaming" },
+                ...toolCallsCollected.map(tc => ({ type: "tool-call", ...tc })),
+                ...toolResultsCollected.map(tr => ({ type: "tool-result", ...tr })),
+              ];
+              
+              await prisma.message.update({
+                where: { id: assistantMessageId },
+                data: { content: JSON.stringify(currentParts) },
+              }).catch(err => console.error("Failed to update message:", err));
+            }
           }
+
+          // Wait for all steps to complete (tool calls finish)
+          await result.text;
 
           // Send reasoning if collected
           if (reasoningCollected) {
@@ -188,20 +270,61 @@ export async function POST(req: NextRequest) {
             );
           }
 
-          // Send finish event
+          // Update assistant message with FINAL content
+          const assistantParts: any[] = [];
+          
+          if (textCollected) {
+            assistantParts.push({ type: "text", text: textCollected, status: "complete" });
+          }
+          
+          if (reasoningCollected) {
+            assistantParts.push({ type: "reasoning", text: reasoningCollected });
+          }
+          
+          for (const toolCall of toolCallsCollected) {
+            assistantParts.push({ type: "tool-call", ...toolCall });
+          }
+          
+          for (const toolResult of toolResultsCollected) {
+            assistantParts.push({ type: "tool-result", ...toolResult });
+          }
+
+          if (assistantMessageId) {
+            await prisma.message.update({
+              where: { id: assistantMessageId },
+              data: { content: JSON.stringify(assistantParts) },
+            });
+          }
+
+          // Send finish event after everything is done
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify({ type: "finish" })}\n\n`)
           );
 
           controller.close();
         } catch (error: any) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`
-            )
-          );
+          // Check if it was aborted
+          if (error.name === 'AbortError') {
+            console.log("🛑 Stream aborted by client");
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ type: "error", error: "Generation stopped by user" })}\n\n`
+              )
+            );
+          } else {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`
+              )
+            );
+          }
           controller.close();
         }
+      },
+      cancel() {
+        // Called when the client disconnects or aborts
+        console.log("🛑 Client disconnected, aborting stream");
+        abortController.abort();
       },
     });
 

@@ -1,13 +1,16 @@
 import React from "react";
-import { Loader2, Brain, ChevronDown, BrushCleaning } from "lucide-react";
+import { Loader2, Brain, ChevronDown, Plus } from "lucide-react";
 import { MessageBubble } from "./message-bubble";
 import { InputSection } from "./input-section";
 import { FileMentionAutocomplete, type FileItem, type MentionItem } from "./file-mention-autocomplete";
+import { RestoreCheckpointModal } from "./restore-checkpoint-modal";
+import { ChatDropdown, type ChatItem } from "./chat-dropdown";
 import type { Message, AttachedImage } from "./types";
 
 interface AIAgentPanelProps {
   workspaceId: string;
   messages: Message[];
+  isWorkSpaceRunning: boolean;
   input: string;
   setInput: (value: string) => void;
   handleSend: (messageOverride?: string, images?: AttachedImage[]) => void;
@@ -21,12 +24,19 @@ interface AIAgentPanelProps {
   setExpandedReasoning: React.Dispatch<React.SetStateAction<Set<string>>>;
   handleOpenFile: (filePath: string) => void;
   renderTextWithFileLinks: (text: string) => React.ReactNode;
-  onClearHistory?: () => void;
+  onStopGeneration?: () => void;
+  // Chat management
+  chats: ChatItem[];
+  currentChatId: string | null;
+  currentChatTitle: string;
+  onSelectChat: (chatId: string) => void;
+  onCreateChat: () => void;
 }
 
 export function AIAgentPanel({
   workspaceId,
   messages,
+  isWorkSpaceRunning,
   input,
   setInput,
   handleSend,
@@ -38,11 +48,13 @@ export function AIAgentPanel({
   setExpandedTools,
   handleOpenFile,
   renderTextWithFileLinks,
-  onClearHistory,
+  onStopGeneration,
+  chats,
+  currentChatId,
+  currentChatTitle,
+  onSelectChat,
+  onCreateChat,
 }: AIAgentPanelProps) {
-  const [attachedFiles, setAttachedFiles] = React.useState<
-    Array<{ path: string; name: string; content?: string }>
-  >([]);
   const [attachedImages, setAttachedImages] = React.useState<AttachedImage[]>(
     []
   );
@@ -64,8 +76,14 @@ export function AIAgentPanel({
   
   // Codebase index state
   const [codebaseIndex, setCodebaseIndex] = React.useState<any>(null);
+  
+  // Checkpoint restore state
+  const [restoreModalOpen, setRestoreModalOpen] = React.useState(false);
+  const [restoreCheckpointId, setRestoreCheckpointId] = React.useState<string | null>(null);
+  const [isRestoring, setIsRestoring] = React.useState(false);
+  const [restoreError, setRestoreError] = React.useState<string | null>(null);
 
-  // Fetch file list on mount
+  // Fetch file list and codebase index on mount
   React.useEffect(() => {
     const fetchFiles = async () => {
       try {
@@ -79,11 +97,6 @@ export function AIAgentPanel({
       }
     };
 
-    fetchFiles();
-  }, [workspaceId]);
-
-  // Fetch codebase index on mount
-  React.useEffect(() => {
     const fetchIndex = async () => {
       try {
         const res = await fetch(`/api/workspaces/${workspaceId}/codebase-index`);
@@ -97,6 +110,7 @@ export function AIAgentPanel({
       }
     };
 
+    fetchFiles();
     fetchIndex();
     
     // Refresh index every 5 minutes
@@ -106,6 +120,8 @@ export function AIAgentPanel({
 
   // Detect @ mentions in input
   const handleInputChange = React.useCallback((value: string) => {
+    setInput(value);
+    
     const lastAtIndex = value.lastIndexOf("@");
     if (lastAtIndex === -1) {
       setShowFileMention(false);
@@ -133,7 +149,7 @@ export function AIAgentPanel({
 
     setFileMentionQuery(query);
     setShowFileMention(true);
-  }, []);
+  }, [setInput]);
 
   // Handle file/function selection from autocomplete
   const handleFileSelect = React.useCallback((item: MentionItem) => {
@@ -205,21 +221,10 @@ export function AIAgentPanel({
     setAttachedImages((prev) => prev.filter((img) => img.name !== name));
   }, []);
 
-  const inputRef = React.useRef(input);
-  
-  // Keep ref in sync with input
-  React.useEffect(() => {
-    inputRef.current = input;
-  }, [input]);
-
   const handleSendWithContext = React.useCallback(() => {
-    const currentInput = inputRef.current;
-    
     // Keep @mentions in the text, they'll be styled in the UI
-    // Just send the message as-is
-    const messageToSend = currentInput;
+    const messageToSend = input;
 
-    setAttachedFiles([]);
     setMentionedItems([]);
     setShowFileMention(false);
 
@@ -230,7 +235,7 @@ export function AIAgentPanel({
     } else {
       handleSend(messageToSend);
     }
-  }, [attachedFiles, attachedImages, handleSend]);
+  }, [input, attachedImages, handleSend]);
 
   const handleKeyDown = React.useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -262,19 +267,40 @@ export function AIAgentPanel({
     [isStreaming, showFileMention, handleSendWithContext]
   );
 
-  // Debounced auto-scroll
-  const scrollToBottom = React.useCallback(() => {
-    if (messagesContainerRef.current) {
-      messagesContainerRef.current.scrollTop =
-        messagesContainerRef.current.scrollHeight;
-    }
-  }, []);
-
+  const scrollToBottom = React.useCallback(
+    (smooth: boolean = true) => {
+      if (messagesContainerRef.current) {
+        const el = messagesContainerRef.current;
+        el.scrollTo({
+          top: el.scrollHeight,
+          behavior: smooth ? "smooth" : "auto",
+        });
+      }
+    },
+    []
+  );
+  
   React.useEffect(() => {
-    if (autoScroll || isStreaming) {
-      requestAnimationFrame(scrollToBottom);
+    if (autoScroll) {
+      scrollToBottom(false); // jump immediately on new message
     }
-  }, [messages.length, autoScroll, isStreaming, scrollToBottom]);
+  }, [messages.length, autoScroll, scrollToBottom]);
+
+
+  // Also observe container size (handles streaming text growth)
+React.useEffect(() => {
+  if (!messagesContainerRef.current) return;
+
+  const el = messagesContainerRef.current;
+  const resizeObserver = new ResizeObserver(() => {
+    if (autoScroll) scrollToBottom(true);
+  });
+
+  resizeObserver.observe(el);
+
+  return () => resizeObserver.disconnect();
+}, [autoScroll, scrollToBottom]);
+
 
   const handleScroll = React.useCallback(() => {
     if (messagesContainerRef.current) {
@@ -285,19 +311,68 @@ export function AIAgentPanel({
     }
   }, []);
 
+
+
+  
+
+
+  // Remove mentioned item
+  const handleRemoveMention = React.useCallback((index: number) => {
+    setMentionedItems((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  // Handle restore checkpoint
+  const handleRestoreClick = React.useCallback((messageId: string) => {
+    setRestoreCheckpointId(messageId);
+    setRestoreModalOpen(true);
+  }, []);
+
+  // Determine which messages to show based on scroll position
+  const visibleMessages = React.useMemo(() => {
+    // If user has scrolled up, show all messages
+    if (!autoScroll) {
+      return messages;
+    }
+    
+    // If at bottom, show only last 2 user-assistant pairs (4 messages total)
+    if (messages.length <= 4) {
+      return messages;
+    }
+    
+    // Find the last 2 user messages and their corresponding assistant responses
+    const userMessages = messages.filter(m => m.role === "user");
+    if (userMessages.length === 0) {
+      return messages;
+    }
+    
+    // Get last 2 user messages
+    const lastUserMessages = userMessages.slice(-2);
+    const lastUserIndices = lastUserMessages.map(um => 
+      messages.findIndex(m => m.id === um.id)
+    );
+    
+    // Get the earliest index of the last 2 user messages
+    const startIndex = Math.min(...lastUserIndices);
+    
+    // Return messages from that point onwards
+    return messages.slice(startIndex);
+  }, [messages, autoScroll]);
+
   // Memoize messages rendering
   const renderedMessages = React.useMemo(
     () =>
-      messages.map((message) => (
+      visibleMessages.map((message) => (
         <MessageBubble
           key={message.id}
           message={message}
           expandedTools={expandedTools}
           setExpandedTools={setExpandedTools}
           renderTextWithFileLinks={renderTextWithFileLinks}
+          onRestore={handleRestoreClick}
+          showRestore={message.role === "user"}
         />
       )),
-    [messages, expandedTools, setExpandedTools, renderTextWithFileLinks]
+    [visibleMessages, expandedTools, setExpandedTools, renderTextWithFileLinks, handleRestoreClick]
   );
 
   const hasTextContent = React.useMemo(
@@ -312,51 +387,37 @@ export function AIAgentPanel({
 
   const showProcessing = isStreaming && !hasTextContent;
 
-  // Remove mentioned item
-  const handleRemoveMention = React.useCallback((index: number) => {
-    setMentionedItems((prev) => prev.filter((_, i) => i !== index));
-  }, []);
+  const handleRestoreConfirm = React.useCallback(async () => {
+    if (!restoreCheckpointId) return;
+    
+    setIsRestoring(true);
+    setRestoreError(null);
+    
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/checkpoints/${restoreCheckpointId}/restore`,
+        { method: 'POST' }
+      );
+      
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to restore checkpoint');
+      }
+      
+      // Reload the page to reflect restored state
+      window.location.reload();
+    } catch (error: any) {
+      console.error('Failed to restore checkpoint:', error);
+      setRestoreError(error.message || 'Failed to restore checkpoint. Please try again.');
+      setIsRestoring(false);
+    }
+  }, [restoreCheckpointId, workspaceId]);
 
-  // Memoize InputSection props to prevent unnecessary re-renders
-  // Note: input is included but InputSection uses local state to avoid re-render lag
-  const inputSectionProps = React.useMemo(
-    () => ({
-      input,
-      setInput,
-      handleSend,
-      isStreaming,
-      attachedImages,
-      favoriteModels,
-      selectedModel,
-      setSelectedModel,
-      onImageUpload: handleImageUpload,
-      onRemoveImage: removeAttachedImage,
-      onSendWithContext: handleSendWithContext,
-      onKeyDown: handleKeyDown,
-      showFileMention,
-      onInputChange: handleInputChange,
-      mentionedItems,
-      onRemoveMention: handleRemoveMention,
-    }),
-    [
-      input,
-      setInput,
-      handleSend,
-      isStreaming,
-      attachedImages,
-      favoriteModels,
-      selectedModel,
-      setSelectedModel,
-      handleImageUpload,
-      removeAttachedImage,
-      handleSendWithContext,
-      handleKeyDown,
-      showFileMention,
-      handleInputChange,
-      mentionedItems,
-      handleRemoveMention,
-    ]
-  );
+  const handleRestoreCancel = React.useCallback(() => {
+    setRestoreModalOpen(false);
+    setRestoreCheckpointId(null);
+    setRestoreError(null);
+  }, []);
 
   // Handle paste for images (isolated effect)
   React.useEffect(() => {
@@ -391,23 +452,47 @@ export function AIAgentPanel({
     return () => window.removeEventListener("paste", handlePaste);
   }, []); // Empty deps: only once
 
+  // Get message preview for restore modal
+  const restoreMessage = React.useMemo(() => {
+    if (!restoreCheckpointId) return null;
+    return messages.find(m => m.id === restoreCheckpointId);
+  }, [restoreCheckpointId, messages]);
+
+  const restoreMessagePreview = React.useMemo(() => {
+    if (!restoreMessage) return "";
+    const textPart = restoreMessage.parts.find(p => p.type === "text");
+    return (textPart as any)?.text || "No message";
+  }, [restoreMessage]);
+
   return (
-    <div className="w-full h-full shrink-0 bg-zinc-950 flex flex-col shadow-2xl overflow-hidden">
-      {/* Header (simple, no heavy logic) */}
+    <>
+      <div className="w-full h-full shrink-0 bg-zinc-950 flex flex-col shadow-2xl overflow-hidden">
+      {/* Header */}
       <div className="px-4 py-3 border-b border-zinc-800/30 shrink-0 flex items-center justify-between">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
           <Brain className="h-4 w-4 text-emerald-500" />
           <span className="text-sm font-medium text-zinc-300">AI Agent</span>
         </div>
-        {messages.length > 0 && onClearHistory && (
-          <button
-            onClick={onClearHistory}
-            className="h-7 px-2 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-colors"
-            title="Clear chat history"
-          >
-            <BrushCleaning className="h-3.5 w-3.5" />
-          </button>
-        )}
+        
+        {/* Chat Dropdown - Center */}
+        <div className="flex-1 flex justify-center max-w-xs">
+          <ChatDropdown
+            chats={chats}
+            currentChatId={currentChatId}
+            currentChatTitle={currentChatTitle}
+            onSelectChat={onSelectChat}
+            onCreateChat={onCreateChat}
+          />
+        </div>
+        
+        {/* New Chat Button - Right */}
+        <button
+          onClick={onCreateChat}
+          className="p-2 hover:bg-zinc-800 rounded-md transition-colors"
+          title="New Chat"
+        >
+          <Plus className="h-4 w-4 text-zinc-400" />
+        </button>
       </div>
 
       {/* Messages */}
@@ -427,6 +512,26 @@ export function AIAgentPanel({
           </div>
         ) : (
           <div className="max-w-3xl mx-auto space-y-6">
+            {/* Show indicator when older messages are hidden */}
+            {autoScroll && visibleMessages.length < messages.length && (
+              <div className="flex items-center justify-center py-3">
+                <button
+                  onClick={() => {
+                    setAutoScroll(false);
+                    // Scroll to top to show all messages
+                    if (messagesContainerRef.current) {
+                      messagesContainerRef.current.scrollTop = 0;
+                    }
+                  }}
+                  className="text-xs text-zinc-500 hover:text-zinc-400 transition-colors flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-zinc-800/50"
+                >
+                  <ChevronDown className="h-3 w-3 rotate-180" />
+                  {messages.length - visibleMessages.length} older message{messages.length - visibleMessages.length !== 1 ? 's' : ''} hidden
+                  <span className="text-zinc-600">• Click to view all</span>
+                </button>
+              </div>
+            )}
+            
             {renderedMessages}
 
             {showProcessing && (
@@ -468,8 +573,39 @@ export function AIAgentPanel({
         )}
 
         {/* Input Section */}
-        <InputSection {...inputSectionProps} />
+        <InputSection
+          input={input}
+          setInput={setInput}
+          isWorkSpaceRunning={isWorkSpaceRunning}
+          handleSend={handleSend}
+          isStreaming={isStreaming}
+          attachedImages={attachedImages}
+          favoriteModels={favoriteModels}
+          selectedModel={selectedModel}
+          setSelectedModel={setSelectedModel}
+          onImageUpload={handleImageUpload}
+          onRemoveImage={removeAttachedImage}
+          onSendWithContext={handleSendWithContext}
+          onKeyDown={handleKeyDown}
+          showFileMention={showFileMention}
+          onInputChange={handleInputChange}
+          mentionedItems={mentionedItems}
+          onRemoveMention={handleRemoveMention}
+          onStop={onStopGeneration}
+        />
       </div>
     </div>
+    
+    {/* Restore Checkpoint Modal */}
+    <RestoreCheckpointModal
+      isOpen={restoreModalOpen}
+      onClose={handleRestoreCancel}
+      onConfirm={handleRestoreConfirm}
+      messagePreview={restoreMessagePreview}
+      timestamp={restoreMessage?.createdAt || new Date()}
+      isRestoring={isRestoring}
+      error={restoreError}
+    />
+  </>
   );
 }

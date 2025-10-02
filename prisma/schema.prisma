@@ -103,8 +103,9 @@ model Workspace {
   user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   
   // Relations
-  messages        Message[]
+  chats           Chat[]
   deployments     Deployment[]
+  checkpoints     AgentCheckpoint[]
   
   // Metadata
   lastAccessedAt  DateTime        @default(now())
@@ -114,6 +115,28 @@ model Workspace {
   @@index([userId])
   @@index([status])
   @@index([lastAccessedAt])
+}
+
+model Chat {
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  workspaceId     String    @db.ObjectId
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  title           String    @default("New Chat")
+  description     String?
+  
+  // Relations
+  messages        Message[]
+  
+  // Metadata
+  isPinned        Boolean   @default(false)
+  lastMessageAt   DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([workspaceId])
+  @@index([lastMessageAt])
+  @@index([createdAt])
 }
 
 enum WorkspaceStatus {
@@ -139,7 +162,6 @@ model Preset {
   userId          String   @db.ObjectId
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
-  createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   
   @@index([userId])
@@ -147,15 +169,55 @@ model Preset {
 
 model Message {
   id              String    @id @default(auto()) @map("_id") @db.ObjectId
-  workspaceId     String    @db.ObjectId
-  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  chatId          String    @db.ObjectId
+  chat            Chat      @relation(fields: [chatId], references: [id], onDelete: Cascade)
   
   role            String    // "user" or "assistant"
   content         String    // JSON stringified message parts array
   
+  // Checkpoint/resume support
+  status          String?   @default("complete") // "streaming", "complete", "error"
+  checkpointData  String?   // JSON stringified checkpoint state
+  
   createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([chatId])
+  @@index([createdAt])
+  @@index([status])
+}
+
+model AgentCheckpoint {
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  workspaceId     String    @db.ObjectId
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  messageId       String    @db.ObjectId  // Associated message being generated
+  
+  // Checkpoint state
+  stepNumber      Int       // Current step number
+  textCollected   String    @default("")
+  toolCalls       String    @default("[]") // JSON array
+  toolResults     String    @default("[]") // JSON array
+  reasoning       String    @default("")
+  
+  // Status tracking
+  status          String    @default("pending") // "pending", "processing", "completed", "error"
+  lockedAt        DateTime? // For SKIP LOCKED pattern
+  lockedBy        String?   // Process/worker ID that locked this
+  
+  // Metadata
+  model           String    // Model being used
+  temperature     Float?
+  maxSteps        Int       @default(10)
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  completedAt     DateTime?
   
   @@index([workspaceId])
+  @@index([messageId])
+  @@index([status, lockedAt]) // For SKIP LOCKED queries
   @@index([createdAt])
 }
 

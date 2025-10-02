@@ -53,9 +53,9 @@ async function monitorWorkspaceStartup(
           logText.includes("will be fetched"))
       ) {
         nixInstalling = true;
-        maxChecks = 250; // Extend to 5 minutes when Nix is installing
+        maxChecks = 100; // Extend to 100 seconds when Nix is installing
         console.log(
-          `📦 Workspace ${workspaceId}: Nix package installation detected, extending timeout to 5 minutes`
+          `📦 Workspace ${workspaceId}: Nix package installation detected, extending timeout to 100 seconds`
         );
       }
 

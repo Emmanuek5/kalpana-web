@@ -51,6 +51,114 @@
       {
         "command": "kalpana.getHover",
         "title": "Kalpana: Get Hover Information"
+      },
+      {
+        "command": "kalpana.refreshCheckpoints",
+        "title": "Refresh Checkpoints",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "kalpana.viewCheckpoint",
+        "title": "View Checkpoint Diff"
+      },
+      {
+        "command": "kalpana.restoreCheckpointFromPanel",
+        "title": "Restore Checkpoint",
+        "icon": "$(history)"
+      },
+      {
+        "command": "kalpana.generateCommitMessage",
+        "title": "Generate AI Commit Message",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "kalpana.addToChat",
+        "title": "Add to Chat Context",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "kalpana.sendToAgent",
+        "title": "Send to Kalpana Agent",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "kalpana.showSelectionMenu",
+        "title": "Kalpana: Show Selection Menu",
+        "icon": "$(menu)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kalpana",
+          "title": "Kalpana",
+          "icon": "$(history)"
+        }
+      ]
+    },
+    "views": {
+      "kalpana": [
+        {
+          "id": "kalpanaCheckpoints",
+          "name": "Checkpoints",
+          "icon": "$(history)",
+          "contextualTitle": "Kalpana Checkpoints"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "kalpana.refreshCheckpoints",
+          "when": "view == kalpanaCheckpoints",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "kalpana.restoreCheckpointFromPanel",
+          "when": "view == kalpanaCheckpoints && viewItem == checkpoint",
+          "group": "inline"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "kalpana.generateCommitMessage",
+          "group": "navigation",
+          "when": "scmProvider == git"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "kalpana.addToChat",
+          "when": "editorHasSelection",
+          "group": "kalpana@1"
+        },
+        {
+          "command": "kalpana.sendToAgent",
+          "when": "editorHasSelection",
+          "group": "kalpana@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "kalpana.showSelectionMenu",
+        "key": "ctrl+k ctrl+m",
+        "mac": "cmd+k cmd+m",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "kalpana.addToChat",
+        "key": "ctrl+k ctrl+c",
+        "mac": "cmd+k cmd+c",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "kalpana.sendToAgent",
+        "key": "ctrl+k ctrl+a",
+        "mac": "cmd+k cmd+a",
+        "when": "editorHasSelection"
       }
     ]
   },
@@ -62,6 +170,7 @@
   "dependencies": {
     "@openrouter/ai-sdk-provider": "^latest",
     "ai": "^latest",
+    "zod": "^3.22.0",
     "kalpana-diagnostics": "file:",
     "ws": "^latest"
   },

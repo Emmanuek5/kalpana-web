@@ -5,7 +5,7 @@ import { createTwoFilesPatch } from "diff";
 /**
  * Code Editing Agent - Specialized agent for making code changes
  * Uses AI SDK v5 structured object generation
- * Pattern follows web-research-agent.ts
+ * Pattern follows web-research-agent.ts and sub-agent-tools.ts
  */
 
 // Define the schema for editing actions the agent can take
@@ -79,30 +79,54 @@ export interface CodeEditResult {
   history: Array<{ action: EditAction; result: any }>;
 }
 
+const CODE_EDITING_SYSTEM_PROMPT = `You are a specialized code editing agent. Your purpose is to make precise, high-quality code changes based on instructions.
+
+## Core Responsibilities
+- Analyze code to understand what needs changing
+- Plan edits carefully before applying them
+- Write clean, well-structured, and maintainable code
+- Follow language-specific conventions and best practices
+- Preserve existing code structure when modifying files
+- Validate changes to ensure correctness
+
+## Editing Process
+1. **analyzeCode**: Understand the current code and what needs to change
+2. **planEdit**: Outline the specific changes you'll make
+3. **applyEdit**: Make the actual changes with complete new file content
+4. **validateEdit**: Check your work for correctness
+5. **finishEditing**: Complete the task with a summary
+
+## Output Requirements
+- When using applyEdit, provide COMPLETE file content (not just changes)
+- Use actual newlines in code, not escaped \\n characters
+- Ensure code is properly formatted and indented
+- Preserve imports and code not being modified
+- Include appropriate error handling
+
+You must follow the editing process systematically and complete all requested changes.`;
+
 export async function executeCodeEdit(
   task: CodeEditTask
 ): Promise<CodeEditResult> {
   const { instruction, files, context, model, maxSteps = 10 } = task;
+
+  // Model must be provided from the main agent to use user's API key
+  if (!model) {
+    throw new Error("Model is required for code editing agent");
+  }
 
   const edits: CodeEditResult["edits"] = [];
   const history: CodeEditResult["history"] = [];
   let scratchpad = "";
 
   try {
-    // Model must be provided from the main agent to use user's API key
-    if (!model) {
-      throw new Error("Model is required for code editing agent");
-    }
-
-    const agentModel = model;
-
     // Create file map for easy access
     const fileMap = new Map(files.map((f) => [f.path, f.content]));
 
     for (let step = 0; step < maxSteps; step++) {
-      // Decide next action
+      // Decide next action using the provided model
       const action = await decideNextEditAction(
-        agentModel,
+        model,
         instruction,
         files,
         context,
@@ -166,6 +190,7 @@ export async function executeCodeEdit(
       history,
     };
   } catch (error: any) {
+    console.error("Code editing agent error:", error);
     return {
       success: false,
       explanation: `Failed to generate code edits: ${error.message}`,
@@ -177,7 +202,7 @@ export async function executeCodeEdit(
 }
 
 async function decideNextEditAction(
-  model: any,
+  model: any, // Model from main agent with user's API key
   instruction: string,
   files: Array<{ path: string; content: string }>,
   context: string | undefined,
@@ -225,21 +250,30 @@ Return the next single action to take.`;
   try {
     const { object: action } = await generateObject({
       model,
+      system: CODE_EDITING_SYSTEM_PROMPT,
       schema: editActionSchema,
+      schemaName: "EditAction",
+      schemaDescription: "The next editing action to take on the codebase",
       prompt,
-      mode: "json", // Explicitly request JSON mode for better compatibility
     });
 
     return action;
   } catch (error: any) {
     console.error("Code editing agent - generateObject error:", error);
-    console.error("Model:", model);
     console.error("Error details:", error.message);
+    
+    // Log additional error info if available
+    if (error.text) {
+      console.error("Model response text:", error.text);
+    }
+    if (error.response) {
+      console.error("Model response object:", JSON.stringify(error.response, null, 2));
+    }
 
     // Fallback: If structured generation fails, finish editing
     return {
       action: "finishEditing",
-      summary: `Unable to complete code editing due to model output parsing error: ${error.message}. Please try using a different model that supports structured output better (e.g., Claude 3.5 Sonnet or GPT-4).`,
+      summary: `Unable to complete code editing due to parsing error: ${error.message}. Edits completed so far: ${edits.map(e => e.file).join(", ") || "none"}`,
     };
   }
 }

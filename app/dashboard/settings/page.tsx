@@ -39,6 +39,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [apiKey, setApiKey] = useState("");
+  const [hasExistingApiKey, setHasExistingApiKey] = useState(false);
   const [favoriteModels, setFavoriteModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -83,6 +84,7 @@ export default function SettingsPage() {
         const data = await res.json();
         setFavoriteModels(data.favoriteModels || []);
         setDefaultModel(data.defaultModel || "");
+        setHasExistingApiKey(data.hasApiKey || false);
       }
     } catch (error) {
       console.error("Error fetching settings:", error);
@@ -183,17 +185,27 @@ export default function SettingsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
+      // Only include fields that should be updated
+      const updateData: any = {
+        favoriteModels,
+        defaultModel,
+      };
+
+      // Only update API key if user entered something
+      if (apiKey.trim()) {
+        updateData.openrouterApiKey = apiKey;
+      }
+
       const res = await fetch("/api/user/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          openrouterApiKey: apiKey || null,
-          favoriteModels,
-          defaultModel,
-        }),
+        body: JSON.stringify(updateData),
       });
 
       if (res.ok) {
+        const data = await res.json();
+        setHasExistingApiKey(data.hasApiKey || false);
+        setApiKey(""); // Clear input after save
         alert("Settings saved successfully!");
       } else {
         const error = await res.json();
@@ -336,9 +348,14 @@ export default function SettingsPage() {
                         type={showApiKey ? "text" : "password"}
                         value={apiKey}
                         onChange={(e) => setApiKey(e.target.value)}
-                        placeholder="sk-or-v1-..."
+                        placeholder={hasExistingApiKey ? "Enter new key to update..." : "sk-or-v1-..."}
                         className="bg-zinc-900 border-zinc-800 focus:border-zinc-600 focus:ring-0 text-sm h-11"
                       />
+                      {hasExistingApiKey && !apiKey && (
+                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-emerald-500 pointer-events-none">
+                          ✓ API key saved
+                        </div>
+                      )}
                       <button
                         onClick={() => setShowApiKey(!showApiKey)}
                         className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-400 transition-colors"

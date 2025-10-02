@@ -1,22 +1,12 @@
 import { z } from "zod";
 import { generateObject } from "ai";
-import puppeteer, { Browser, Page } from "puppeteer-core";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import * as browser from "./browser";
+import * as scraper from "../local-scraper";
 
-/**
- * Web Research Agent - Autonomous browser-based research
- * Uses Puppeteer for browser automation and AI SDK v5 for decisions
- * Pattern: Agent has its own tools and makes structured decisions
- */
-
-// Global browser instance for the agent
-let browserInstance: Browser | null = null;
-let currentPage: Page | null = null;
-
-// Page cache to avoid re-scraping
+// Simple page cache to avoid re-scraping the same URL repeatedly
 const pageCache = new Map<string, any>();
 
-// Define a structured finding format
+// Define a structured finding format for the agent's research
 type Finding = {
   title: string;
   url: string;
@@ -24,72 +14,109 @@ type Finding = {
   source?: string;
 };
 
-// Define the schema for the agent's available tools
+// Define the schema for the tools that the agent can use
 const toolSchemas = z.union([
   z.object({
     tool: z.literal("goToPage"),
-    url: z.string().url().describe("URL to navigate to"),
-  }),
-  z.object({
-    tool: z.literal("extractText"),
-    selector: z
-      .string()
-      .optional()
-      .describe(
-        "CSS selector to extract text from (optional, defaults to body)"
-      ),
+    url: z.string().url(),
   }),
   z.object({
     tool: z.literal("clickElement"),
     selector: z.string().describe("CSS selector for the element to click"),
   }),
   z.object({
-    tool: z.literal("getLinks"),
-    limit: z.number().optional().describe("Max number of links to return"),
+    tool: z.literal("typeText"),
+    selector: z.string().describe("CSS selector for the input element"),
+    text: z.string(),
   }),
   z.object({
     tool: z.literal("updateScratchpad"),
-    newData: z.string().describe("New information to add to notes"),
+    newData: z
+      .string()
+      .describe("New information to add to the agent's scratchpad."),
   }),
   z.object({
     tool: z.literal("saveFinding"),
-    finding: z.object({
-      title: z.string().min(1),
-      url: z.string().url(),
-      summary: z.string().optional(),
-      source: z.string().optional(),
-    }),
+    finding: z
+      .object({
+        title: z.string().min(1),
+        url: z.string().url(),
+        summary: z.string().optional(),
+        source: z.string().optional(),
+      })
+      .describe("Structured research finding to persist in memory"),
+  }),
+  z.object({
+    tool: z.literal("getText"),
+    selector: z
+      .string()
+      .describe("CSS selector for the element to get text from"),
+  }),
+  z.object({
+    tool: z.literal("getAttribute"),
+    selector: z.string().describe("CSS selector for the element"),
+    attribute: z.string().describe("The attribute to get from the element"),
+  }),
+  z.object({
+    tool: z.literal("scrollTo"),
+    selector: z.string().describe("CSS selector for the element to scroll to"),
   }),
   z.object({
     tool: z.literal("sleep"),
-    ms: z.number().int().min(100).max(5000).describe("Milliseconds to wait"),
+    ms: z.number().int().min(50).max(5000).describe("Milliseconds to pause"),
   }),
   z.object({
     tool: z.literal("finishTask"),
-    result: z.string().describe("Final summary of research findings"),
+    result: z.string().describe("The final result or summary of the task"),
   }),
 ]);
 
 type Tool = z.infer<typeof toolSchemas>;
 
-export interface LocalAgentOptions {
+export interface WebResearchAgentOptions {
   task: string;
   startUrl?: string;
   maxSteps?: number;
   performanceMode?: "fast" | "balanced" | "thorough";
+  aiEveryNSteps?: number;
   maxFindings?: number;
+  maxLinksPerStep?: number;
   model: any; // Required: Language model from main agent (uses user's API key)
 }
 
-export async function runLocalAgent(options: LocalAgentOptions) {
+export async function runWebResearchAgent(options: WebResearchAgentOptions) {
   const {
     task,
     startUrl,
     maxSteps = 20,
-    performanceMode = "balanced",
+    performanceMode = "fast",
+    aiEveryNSteps,
     maxFindings = 10,
+    maxLinksPerStep,
     model,
   } = options;
+
+  // Model must be provided from the main agent to use user's API key
+  if (!model) {
+    throw new Error("Model is required for web research agent");
+  }
+
+  const resolvedAiEvery = Math.max(
+    1,
+    aiEveryNSteps ??
+      (performanceMode === "thorough"
+        ? 1
+        : performanceMode === "balanced"
+        ? 3
+        : 5)
+  );
+  const resolvedMaxLinks =
+    maxLinksPerStep ??
+    (performanceMode === "thorough"
+      ? 25
+      : performanceMode === "balanced"
+      ? 15
+      : 10);
 
   pageCache.clear();
   let scratchpad = "";
@@ -98,30 +125,31 @@ export async function runLocalAgent(options: LocalAgentOptions) {
   const history: Array<{ action: Tool; result: any }> = [];
 
   try {
-    // Model must be provided from the main agent to use user's API key
-    if (!model) {
-      throw new Error("Model is required for web research agent");
-    }
-
-    const agentModel = model;
-
-    // Initialize browser
-    await initBrowser();
-
-    // Navigate to starting URL
+    // 1. Navigate to the starting URL or a search engine (faster waitUntil/timeout)
     const initialUrl =
       startUrl || `https://www.google.com/search?q=${encodeURIComponent(task)}`;
-    await goToPage(initialUrl);
-    visitedUrls.add(initialUrl);
+    await browser.goToPage({
+      url: initialUrl,
+      waitUntil: "domcontentloaded",
+      timeout: 15000,
+    });
 
-    for (let step = 0; step < maxSteps; step++) {
-      // Observe current page state
-      const pageState = await observePageState();
+    for (let i = 0; i < maxSteps; i++) {
+      const stepNumber = i + 1;
+      const isAiStep =
+        performanceMode === "thorough" || stepNumber % resolvedAiEvery === 0;
+
+      // 2. Observe the current state of the page (fast path with optional AI)
+      const pageState = await observePageState({
+        maxLinks: resolvedMaxLinks,
+        aiStep: isAiStep,
+        fast: performanceMode === "fast",
+      });
       if (pageState.url) visitedUrls.add(pageState.url);
 
-      // Decide next action using AI
+      // 3. Decide the next action using the AI model (with user's API key)
       const action = await decideNextAction(
-        agentModel,
+        model, // Use the model passed from main agent
         task,
         pageState,
         history,
@@ -131,21 +159,28 @@ export async function runLocalAgent(options: LocalAgentOptions) {
         maxFindings
       );
 
-      // Execute the action
+      // 4. Execute the action
       const result = await executeAction(action);
       history.push({ action, result });
 
-      // Update memory
+      // 4b. Maintain memory/state
       if (action.tool === "updateScratchpad") {
         scratchpad += `\n${action.newData}`;
       } else if (action.tool === "saveFinding") {
         findings.push(action.finding);
         scratchpad += `\nFinding: ${action.finding.title} — ${action.finding.url}`;
-      } else if (action.tool === "goToPage") {
+      }
+
+      if (action.tool === "goToPage") {
         visitedUrls.add(action.url);
       }
 
-      // Check for completion
+      // Early exit if we reached target findings and agent chooses to stop soon
+      if (findings.length >= maxFindings && performanceMode !== "thorough") {
+        // Give the agent one more chance next loop to produce finishTask
+      }
+
+      // 5. Check for task completion
       if (action.tool === "finishTask") {
         return {
           success: true,
@@ -154,127 +189,96 @@ export async function runLocalAgent(options: LocalAgentOptions) {
           history,
         };
       }
-
-      // Early exit if we have enough findings
-      if (findings.length >= maxFindings && performanceMode !== "thorough") {
-        // Give agent one more step to finish
-        if (step > 0) break;
-      }
     }
 
-    // Max steps reached
-    return {
-      success: false,
-      error: "Max steps reached",
-      findings,
-      history,
-    };
+    return { success: false, error: "Max steps reached", findings, history };
   } catch (error: any) {
     console.error("Web research agent error:", error);
-    return {
-      success: false,
-      error: error.message || "Web research failed",
-      findings,
-      history,
-      note: error.message?.includes("parse")
-        ? "This model may not support structured output well. Try Claude 3.5 Sonnet or GPT-4."
-        : undefined,
+    return { 
+      success: false, 
+      error: error.message || "Web research failed", 
+      findings, 
+      history 
     };
   } finally {
-    await closeBrowser();
+    await browser.closeBrowser();
   }
 }
 
-// Browser helper functions
-async function initBrowser() {
-  if (!browserInstance) {
-    browserInstance = await puppeteer.launch({
-      headless: true,
-      executablePath:
-        process.env.CHROME_PATH || process.platform === "win32"
-          ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-          : "/usr/bin/chromium-browser",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ],
-    });
-    currentPage = await browserInstance.newPage();
-    await currentPage.setViewport({ width: 1280, height: 720 });
+async function observePageState(opts: {
+  fast: boolean;
+  aiStep: boolean;
+  maxLinks: number;
+}) {
+  const pageInfo = await browser.getPageInfo();
+  if (!pageInfo.success || !pageInfo.url) {
+    throw new Error(`Failed to get page info: ${pageInfo.error}`);
   }
-}
 
-async function closeBrowser() {
-  if (browserInstance) {
-    await browserInstance.close();
-    browserInstance = null;
-    currentPage = null;
-  }
-}
-
-async function goToPage(url: string) {
-  if (!currentPage) throw new Error("Browser not initialized");
-  try {
-    await currentPage.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 15000,
-    });
-    return { success: true, url };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
-}
-
-async function observePageState() {
-  if (!currentPage) throw new Error("Browser not initialized");
-
-  const url = currentPage.url();
-  const cached = pageCache.get(url);
+  const cached = pageCache.get(pageInfo.url);
   if (cached) return cached;
 
-  try {
-    const title = await currentPage.title();
+  // Fast-link extraction via browser, avoid heavy scraping each step
+  const linksResult = await browser
+    .getAllElements({
+      selector: "a[href]",
+      attribute: "href",
+      getText: true,
+      waitForSelector: false,
+      timeout: 2000,
+    })
+    .catch(() => ({ success: false } as any));
 
-    // Extract links
-    const links = await currentPage.evaluate(() => {
-      const anchors = Array.from(document.querySelectorAll("a[href]"));
-      return anchors
-        .slice(0, 15)
-        .map((a) => ({
-          text: (a as HTMLAnchorElement).textContent?.trim() || "",
-          url: (a as HTMLAnchorElement).href,
-        }))
-        .filter((l) => l.url.startsWith("http"));
-    });
+  const links = Array.isArray(linksResult?.elements)
+    ? linksResult.elements
+        .map((el: any) => ({ text: el.text || "", url: el.attribute }))
+        .filter(
+          (l: any) => typeof l.url === "string" && l.url.startsWith("http")
+        )
+        .slice(0, opts.maxLinks)
+    : [];
 
-    // Extract text summary
-    const textContent = await currentPage.evaluate(() => {
-      // Remove scripts, styles, etc.
-      const clone = document.body.cloneNode(true) as HTMLElement;
-      clone
-        .querySelectorAll("script, style, nav, footer, header")
-        .forEach((el) => el.remove());
-      return clone.innerText.slice(0, 2000);
-    });
-
-    const state = {
-      url,
-      title,
-      textContent,
-      links,
-    };
-
-    pageCache.set(url, state);
-    return state;
-  } catch (error: any) {
-    return { url, title: "", textContent: "", links: [] };
+  // Very fast text extraction; reserve AI analysis for aiStep
+  let analysis: any = {};
+  if (opts.aiStep) {
+    const scraped = await scraper
+      .localScrape({
+        url: pageInfo.url,
+        useAI: true,
+        extractLinks: false,
+        extractMetadata: false,
+        ignoreImages: true,
+        maxScrolls: 1,
+        timeout: 20000,
+      })
+      .catch(() => ({ success: false } as any));
+    if (scraped?.success) {
+      analysis = scraped.aiAnalysis || {
+        summary: scraped.content?.slice(0, 1200),
+      };
+    }
+  } else {
+    const quick = await scraper
+      .quickExtractText(pageInfo.url, 12000)
+      .catch(() => ({ success: false } as any));
+    if (quick?.success) {
+      analysis = { summary: quick.text?.slice(0, 1200) };
+    }
   }
+
+  const state = {
+    url: pageInfo.url,
+    title: pageInfo.title,
+    analysis,
+    links,
+  } as const;
+
+  pageCache.set(pageInfo.url, state);
+  return state;
 }
 
 async function decideNextAction(
-  model: any,
+  model: any, // Model from main agent with user's API key
   task: string,
   pageState: any,
   history: any[],
@@ -286,138 +290,102 @@ async function decideNextAction(
   const recentHistory = history.slice(-6);
 
   const prompt = `You are an autonomous web research agent. Your goal is to: ${task}
-Target: up to ${maxFindings} high-quality findings.
+Target results: up to ${maxFindings} high-quality items.
 
-Current Page:
+Current State:
 - URL: ${pageState.url}
 - Title: ${pageState.title}
 
-Available Links (top ${pageState.links?.length || 0}):
+Outgoing links (first ${pageState.links?.length ?? 0}):
 ${(pageState.links || [])
   .map((l: any, i: number) => `${i + 1}. ${l.text || "(no text)"} — ${l.url}`)
   .join("\n")}
 
-Page Content Preview:
-${pageState.textContent?.slice(0, 800) || "(no content)"}
+Scratchpad:
+${(scratchpad || "(empty)").slice(0, 1500)}
 
-Your Notes:
-${scratchpad || "(empty)"}
-
-Findings So Far (${findings.length}/${maxFindings}):
-${
-  findings.map((f, i) => `${i + 1}. ${f.title} — ${f.url}`).join("\n") ||
-  "(none)"
-}
+Findings (${findings.length}/${maxFindings}):
+${findings
+  .map((f, i) => `${i + 1}. ${f.title} — ${f.url}`)
+  .slice(0, 15)
+  .join("\n")}
 
 Visited URLs:
 ${visitedUrls
-  .slice(-15)
+  .slice(-20)
   .map((u) => `- ${u}`)
   .join("\n")}
 
-Recent Actions:
-${recentHistory.map((h) => `- ${h.action.tool}`).join("\n") || "(none)"}
-
 Guidelines:
-- Use goToPage to navigate to promising links
-- Use extractText to get detailed content from specific sections
-- Use saveFinding for important discoveries
-- Use updateScratchpad to take notes
-- Use finishTask when you have sufficient findings
-- Prefer authoritative sources
-- Don't revisit URLs you've already seen
+- Prefer authoritative sources; avoid spam.
+- Do not revisit visited URLs.
+- Save strong evidence with saveFinding { title, url, summary }.
+- Use updateScratchpad for raw notes.
+- Navigate using goToPage with a listed link when appropriate.
+- Use sleep 100-800ms if a page is dynamic before scraping again.
+- When you have enough to answer, finishTask with a concise answer and sources.
 
-Return the next single action to take.`;
+History (recent steps):
+${recentHistory.map((h) => `- ${h.action.tool}`).join("\n")}
+
+Return the next single action.`;
 
   try {
     const { object: action } = await generateObject({
       model,
       schema: toolSchemas,
       prompt,
-      mode: "json", // Explicitly request JSON mode for better compatibility
     });
 
     return action;
   } catch (error: any) {
     console.error("Web research agent - generateObject error:", error);
-    console.error("Model:", model);
-    console.error("Error details:", error.message);
-
-    // Fallback: If structured generation fails, finish the task
-    // This prevents the agent from getting stuck
+    
+    // Fallback: finish the task if parsing fails
     return {
       tool: "finishTask",
-      result: `Unable to continue research due to model output parsing error: ${error.message}. Please try using a different model that supports structured output better (e.g., Claude 3.5 Sonnet or GPT-4).`,
+      result: `Research incomplete due to parsing error. Findings so far: ${findings.map(f => `${f.title} (${f.url})`).join(", ")}`,
     };
   }
 }
 
-async function executeAction(action: Tool): Promise<any> {
-  if (!currentPage) throw new Error("Browser not initialized");
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+async function executeAction(action: Tool): Promise<any> {
   switch (action.tool) {
     case "goToPage":
-      return goToPage(action.url);
-
-    case "extractText": {
-      try {
-        const text = await currentPage.evaluate((selector) => {
-          const el = selector
-            ? document.querySelector(selector)
-            : document.body;
-          if (!el) return "";
-          const clone = el.cloneNode(true) as HTMLElement;
-          clone.querySelectorAll("script, style").forEach((e) => e.remove());
-          return clone.innerText.slice(0, 3000);
-        }, action.selector || "body");
-        return { success: true, text };
-      } catch (error: any) {
-        return { success: false, error: error.message };
-      }
-    }
-
-    case "clickElement": {
-      try {
-        await currentPage.click(action.selector);
-        await currentPage.waitForNavigation({ timeout: 5000 }).catch(() => {});
-        return { success: true };
-      } catch (error: any) {
-        return { success: false, error: error.message };
-      }
-    }
-
-    case "getLinks": {
-      try {
-        const links = await currentPage.evaluate((limit) => {
-          const anchors = Array.from(document.querySelectorAll("a[href]"));
-          return anchors
-            .slice(0, limit || 20)
-            .map((a) => ({
-              text: (a as HTMLAnchorElement).textContent?.trim() || "",
-              url: (a as HTMLAnchorElement).href,
-            }))
-            .filter((l) => l.url.startsWith("http"));
-        }, action.limit);
-        return { success: true, links };
-      } catch (error: any) {
-        return { success: false, error: error.message };
-      }
-    }
-
+      return browser.goToPage({
+        url: action.url,
+        waitUntil: "domcontentloaded",
+        timeout: 15000,
+      });
+    case "clickElement":
+      return browser.clickElement({ selector: action.selector });
+    case "typeText":
+      return browser.typeText({
+        selector: action.selector,
+        text: action.text,
+      });
     case "updateScratchpad":
       return { success: true };
-
     case "saveFinding":
       return { success: true };
-
-    case "sleep": {
-      await new Promise((resolve) => setTimeout(resolve, action.ms));
+    case "getText":
+      return browser.getText({ selector: action.selector });
+    case "getAttribute":
+      return browser.getAttribute({
+        selector: action.selector,
+        attribute: action.attribute,
+      });
+    case "scrollTo":
+      return browser.scrollTo({ selector: action.selector });
+    case "sleep":
+      await delay(action.ms);
       return { success: true };
-    }
-
     case "finishTask":
       return { success: true, result: action.result };
-
     default:
       throw new Error("Unknown tool");
   }

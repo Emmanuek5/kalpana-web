@@ -1,9 +1,10 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { containerAPI } from "./container-api";
-import { runLocalAgent } from "./agents/web-research-agent";
+import { runWebResearchAgent } from "./agents/web-research-agent";
 import { executeCodeEdit } from "./agents/code-editing-agent";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { localScrape } from "./local-scraper";
 
 /**
  * Agent tools for workspace interactions
@@ -26,6 +27,48 @@ function unescapeContent(content: string): string {
     .replace(/\\\\/g, "\\");
 }
 
+/**
+ * Wrapper to log tool inputs and outputs for debugging
+ * This wraps the entire tool, not just the execute function
+ * DISABLED: Set to false to reduce console noise
+ */
+function wrapTool<T extends any>(toolName: string, toolDef: T): T {
+  // Logging disabled - return tool as-is
+  return toolDef;
+}
+
+/**
+ * Legacy wrapper for execute functions
+ */
+function wrapToolExecute<T extends (...args: any[]) => any>(
+  toolName: string,
+  executeFn: T
+): T {
+  return (async (...args: any[]) => {
+    const input = args[0];
+    
+    console.log(`\n🔧 [${toolName}] INPUT ==========`);
+    console.log(JSON.stringify(input, null, 2));
+    console.log(`====================================\n`);
+    
+    try {
+      const result = await executeFn(...args);
+      
+      console.log(`\n✅ [${toolName}] OUTPUT ==========`);
+      console.log(JSON.stringify(result, null, 2));
+      console.log(`====================================\n`);
+      
+      return result;
+    } catch (error: any) {
+      console.log(`\n❌ [${toolName}] ERROR ==========`);
+      console.log(`Error: ${error.message}`);
+      console.log(`Stack: ${error.stack}`);
+      console.log(`====================================\n`);
+      throw error;
+    }
+  }) as T;
+}
+
 export function createAgentTools(
   workspaceId: string,
   apiKey: string,
@@ -35,7 +78,7 @@ export function createAgentTools(
   const openrouter = createOpenRouter({ apiKey });
   const agentModel = openrouter.languageModel(modelName);
   return {
-    readFile: tool({
+    readFile: wrapTool("readFile", tool({
       description: "Read the contents of a file from the workspace",
       inputSchema: z.object({
         path: z
@@ -48,6 +91,65 @@ export function createAgentTools(
           return { success: true, content, path };
         } catch (error: any) {
           return { success: false, error: error.message, path };
+        }
+      },
+    })),
+
+    readFileLines: tool({
+      description: "Read specific lines from a file. Useful when you have a file reference like @filepath:10-20 and need to see the actual code.",
+      inputSchema: z.object({
+        path: z
+          .string()
+          .describe("The file path relative to the workspace root"),
+        startLine: z
+          .number()
+          .describe("Starting line number (1-indexed)"),
+        endLine: z
+          .number()
+          .describe("Ending line number (1-indexed)"),
+      }),
+      execute: async ({ path, startLine, endLine }) => {
+        try {
+          const content = await containerAPI.readFile(workspaceId, path);
+          const lines = content.split('\n');
+          
+          // Validate line numbers
+          if (startLine < 1 || endLine < 1) {
+            return { 
+              success: false, 
+              error: "Line numbers must be >= 1", 
+              path 
+            };
+          }
+          
+          if (startLine > endLine) {
+            return { 
+              success: false, 
+              error: "Start line must be <= end line", 
+              path 
+            };
+          }
+          
+          // Extract the requested lines (convert to 0-indexed)
+          const selectedLines = lines.slice(startLine - 1, endLine);
+          const selectedContent = selectedLines.join('\n');
+          
+          return { 
+            success: true, 
+            content: selectedContent,
+            path,
+            startLine,
+            endLine,
+            totalLines: lines.length,
+          };
+        } catch (error: any) {
+          return { 
+            success: false, 
+            error: error.message, 
+            path,
+            startLine,
+            endLine,
+          };
         }
       },
     }),
@@ -63,21 +165,17 @@ export function createAgentTools(
       }),
       execute: async ({ path, content }) => {
         try {
-          // Unescape content in case LLM generated literal \n instead of newlines
+          // Unescape the content before writing
           const unescapedContent = unescapeContent(content);
           await containerAPI.writeFile(workspaceId, path, unescapedContent);
-          return {
-            success: true,
-            message: `File ${path} written successfully`,
-            path,
-          };
+          return { success: true, path };
         } catch (error: any) {
           return { success: false, error: error.message, path };
         }
       },
     }),
 
-    listFiles: tool({
+    listFiles: wrapTool("listFiles", tool({
       description: "List files and directories in a path",
       inputSchema: z.object({
         path: z
@@ -93,7 +191,7 @@ export function createAgentTools(
           return { success: false, error: error.message, path };
         }
       },
-    }),
+    })),
 
     runCommand: tool({
       description: "Execute a shell command in the workspace",
@@ -277,7 +375,7 @@ export function createAgentTools(
       }),
       execute: async ({ task, urls }) => {
         try {
-          const result = await runLocalAgent({
+          const result = await runWebResearchAgent({
             task,
             startUrl: urls && urls[0],
             maxSteps: 20,
@@ -1000,6 +1098,86 @@ export function createAgentTools(
             error: error.message,
             output: error.stdout || "",
             errors: error.stderr || "",
+          };
+        }
+      },
+    }),
+
+    // ========== Web Scraping Tool ==========
+    scrapeWebPage: tool({
+      description:
+        "Scrape and extract content from any web page. Gets text content, metadata, links, and images. Use this to gather information from websites, documentation, articles, or any online resource.",
+      inputSchema: z.object({
+        url: z
+          .string()
+          .describe("The URL to scrape (e.g., 'https://example.com')"),
+        extractLinks: z
+          .boolean()
+          .optional()
+          .describe("Extract all links from the page (default: false)"),
+        extractImages: z
+          .boolean()
+          .optional()
+          .describe("Extract all images from the page (default: false)"),
+        extractMetadata: z
+          .boolean()
+          .optional()
+          .describe("Extract page metadata (title, description, og tags, etc.) (default: false)"),
+        waitForSelector: z
+          .string()
+          .optional()
+          .describe("CSS selector to wait for before extracting content"),
+        timeout: z
+          .number()
+          .optional()
+          .describe("Maximum time to wait in milliseconds (default: 30000)"),
+      }),
+      execute: async ({ 
+        url, 
+        extractLinks = false, 
+        extractImages = false, 
+        extractMetadata = false,
+        waitForSelector,
+        timeout 
+      }) => {
+        try {
+          const result = await localScrape({
+            url,
+            extractLinks,
+            extractImages,
+            extractMetadata,
+            waitForSelector,
+            timeout,
+            useAI: false,
+            ignoreImages: true,
+            maxScrolls: 2,
+          });
+
+          if (!result.success) {
+            return {
+              success: false,
+              error: result.error || "Scraping failed",
+              url,
+            };
+          }
+
+          return {
+            success: true,
+            url: result.url,
+            title: result.title,
+            content: result.content,
+            contentLength: result.content?.length || 0,
+            links: result.links,
+            linksCount: result.links?.length || 0,
+            images: result.images,
+            imagesCount: result.images?.length || 0,
+            metadata: result.metadata,
+          };
+        } catch (error: any) {
+          return {
+            success: false,
+            error: error.message,
+            url,
           };
         }
       },

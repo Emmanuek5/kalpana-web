@@ -56,6 +56,25 @@ function connectToVSCodeExtension() {
     }
   });
 
+  // Global message handler to relay codeContext messages to web clients
+  vscodeWs.on("message", (data: Buffer) => {
+    try {
+      const message = JSON.parse(data.toString());
+      
+      // Relay codeContext messages to all connected web clients
+      if (message.type === 'codeContext') {
+        console.log('📨 Relaying codeContext message to web clients:', message.action);
+        clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(message));
+          }
+        });
+      }
+    } catch (error) {
+      // Ignore parsing errors
+    }
+  });
+
   vscodeWs.on("close", () => {
     console.log("❌ Disconnected from VS Code extension, will retry...");
     vscodeWsReady = false;
@@ -1009,6 +1028,33 @@ const httpServer = createServer(async (req, res) => {
       );
     } catch (error: any) {
       console.error("Error in /agent/status:", error);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  // POST /vscode-command - Send command to VS Code extension
+  if (url.pathname === "/vscode-command" && req.method === "POST") {
+    try {
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk;
+      }
+
+      const command = JSON.parse(body);
+      console.log(`📨 Forwarding command to VS Code extension:`, command.type);
+
+      // Forward command to VS Code extension via WebSocket
+      const result = await sendToVSCodeExtension({
+        id: `checkpoint-${Date.now()}`,
+        ...command,
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (error: any) {
+      console.error("Error in /vscode-command:", error);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: error.message }));
     }

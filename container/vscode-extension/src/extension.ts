@@ -2,9 +2,16 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import { WebSocketServer, WebSocket } from "ws";
 import { KalpanaInlineCompletionProvider } from "./autocomplete-provider";
+import { registerCheckpointsView } from "./checkpoints-panel";
+import { generateCommitMessage, getGitRepository } from "./commit-generator";
+import { getSelectedCodeContext, formatCodeContext, formatCodeWithInstruction, createWebUIMessageSender } from "./code-context";
+import { registerSelectionMenu, setWebUIMessageSender } from "./selection-menu";
+
+// Create output channel for logging
+const outputChannel = vscode.window.createOutputChannel("Kalpana");
 
 // Log that module is being loaded
-console.log("📦 Kalpana extension module loaded");
+outputChannel.appendLine("📦 Kalpana extension module loaded");
 
 const DIAGNOSTICS_FILE = "/tmp/kalpana-diagnostics.json";
 const CONFIG_FILE = "/tmp/kalpana-config.json";
@@ -33,7 +40,11 @@ interface VSCodeCommand {
     | "searchSymbols"
     | "formatDocument"
     | "getHover"
-    | "updateAutocompleteConfig";
+    | "updateAutocompleteConfig"
+    | "createCheckpoint"
+    | "restoreCheckpoint"
+    | "listCheckpoints"
+    | "getCheckpointDiff";
   payload: any;
 }
 
@@ -45,7 +56,7 @@ interface VSCodeResponse {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log("🎯 Kalpana VS Code Extension activated!");
+  outputChannel.appendLine("🚀 Kalpana extension activating...");
 
   // Write activation to a file so we can verify it ran
   try {
@@ -246,6 +257,45 @@ export function activate(context: vscode.ExtensionContext) {
             id: command.id,
             success: true,
             data: { message: "Autocomplete config updated" },
+          };
+        }
+
+        case "createCheckpoint": {
+          const { checkpointId, strategy } = command.payload;
+          const result = await createCheckpoint(checkpointId, strategy);
+          return {
+            id: command.id,
+            success: true,
+            data: result,
+          };
+        }
+
+        case "restoreCheckpoint": {
+          const { checkpointId, stashRef, strategy } = command.payload;
+          const result = await restoreCheckpoint(checkpointId, stashRef, strategy);
+          return {
+            id: command.id,
+            success: true,
+            data: result,
+          };
+        }
+
+        case "listCheckpoints": {
+          const checkpoints = await listCheckpoints();
+          return {
+            id: command.id,
+            success: true,
+            data: { checkpoints },
+          };
+        }
+
+        case "getCheckpointDiff": {
+          const { stashRef } = command.payload;
+          const diff = await getCheckpointDiff(stashRef);
+          return {
+            id: command.id,
+            success: true,
+            data: { diff },
           };
         }
 
@@ -600,6 +650,337 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   context.subscriptions.push(diagnosticListener);
+
+  // ========== Checkpoint Functions ==========
+  async function execGit(command: string): Promise<string> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) throw new Error("No workspace open");
+
+    const { exec } = require("child_process");
+    const { promisify } = require("util");
+    const execAsync = promisify(exec);
+
+    try {
+      const { stdout } = await execAsync(`git ${command}`, {
+        cwd: workspaceFolders[0].uri.fsPath,
+      });
+      return stdout.trim();
+    } catch (error: any) {
+      throw new Error(`Git command failed: ${error.message}`);
+    }
+  }
+
+  async function createCheckpoint(
+    checkpointId: string,
+    strategy: string = "git-stash"
+  ): Promise<any> {
+    console.log(`📸 Creating checkpoint: ${checkpointId}`);
+
+    try {
+      // 1. Stage all changes (including untracked files)
+      await execGit("add -A");
+
+      // 2. Create stash with checkpoint name
+      const stashMessage = `kalpana-checkpoint-${checkpointId}`;
+      await execGit(`stash push -u -m "${stashMessage}"`);
+
+      // 3. Immediately pop it back (so user's work is unchanged)
+      await execGit("stash apply stash@{0}");
+
+      // 4. Get stash hash
+      const stashHash = await execGit("rev-parse stash@{0}");
+
+      // 5. Count files
+      const fileCount = await countWorkspaceFiles();
+
+      console.log(`✅ Checkpoint created: stash@{0} (${stashHash})`);
+
+      return {
+        checkpointId,
+        stashRef: "stash@{0}",
+        hash: stashHash,
+        strategy: "git-stash",
+        fileCount,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error: any) {
+      console.error(`❌ Checkpoint creation failed:`, error);
+      throw new Error(`Failed to create checkpoint: ${error.message}`);
+    }
+  }
+
+  async function restoreCheckpoint(
+    checkpointId: string,
+    stashRef: string,
+    strategy: string = "git-stash"
+  ): Promise<any> {
+    console.log(`🔄 Restoring checkpoint: ${checkpointId} (${stashRef})`);
+
+    try {
+      // 1. Find the stash by message
+      const stashList = await execGit("stash list");
+      const stashLine = stashList
+        .split("\n")
+        .find((line) => line.includes(`kalpana-checkpoint-${checkpointId}`));
+
+      if (!stashLine) {
+        throw new Error("Checkpoint not found in stash list");
+      }
+
+      // Extract stash reference (e.g., "stash@{3}")
+      const match = stashLine.match(/stash@\{(\d+)\}/);
+      if (!match) {
+        throw new Error("Invalid stash reference");
+      }
+      const actualStashRef = match[0];
+
+      // 2. Reset to clean state
+      await execGit("reset --hard HEAD");
+      await execGit("clean -fd");
+
+      // 3. Apply the checkpoint stash
+      await execGit(`checkout ${actualStashRef} -- .`);
+
+      // 4. Reload all open editors
+      await reloadAllEditors();
+
+      console.log(`✅ Checkpoint restored: ${actualStashRef}`);
+
+      vscode.window.showInformationMessage(
+        `✅ Restored to checkpoint: ${checkpointId.substring(0, 8)}`
+      );
+
+      return {
+        restored: true,
+        checkpointId,
+        stashRef: actualStashRef,
+      };
+    } catch (error: any) {
+      console.error(`❌ Checkpoint restoration failed:`, error);
+      vscode.window.showErrorMessage(
+        `Failed to restore checkpoint: ${error.message}`
+      );
+      throw new Error(`Failed to restore checkpoint: ${error.message}`);
+    }
+  }
+
+  async function listCheckpoints(): Promise<any[]> {
+    try {
+      const stashList = await execGit("stash list");
+      const checkpoints = stashList
+        .split("\n")
+        .filter((line) => line.includes("kalpana-checkpoint-"))
+        .map((line) => {
+          const match = line.match(
+            /stash@\{(\d+)\}.*kalpana-checkpoint-([^:]+)/
+          );
+          if (!match) return null;
+
+          return {
+            stashIndex: parseInt(match[1]),
+            checkpointId: match[2],
+            ref: `stash@{${match[1]}}`,
+            message: line,
+          };
+        })
+        .filter((c) => c !== null);
+
+      return checkpoints;
+    } catch (error: any) {
+      console.error("Failed to list checkpoints:", error);
+      return [];
+    }
+  }
+
+  async function getCheckpointDiff(stashRef: string): Promise<string> {
+    try {
+      const diff = await execGit(`stash show -p ${stashRef}`);
+      return diff;
+    } catch (error: any) {
+      return "";
+    }
+  }
+
+  async function reloadAllEditors(): Promise<void> {
+    const openEditors = vscode.window.visibleTextEditors;
+    for (const editor of openEditors) {
+      const uri = editor.document.uri;
+      try {
+        // Close and reopen to force reload
+        await vscode.commands.executeCommand(
+          "workbench.action.closeActiveEditor"
+        );
+        const document = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(document);
+      } catch (error) {
+        console.error(`Failed to reload editor for ${uri.fsPath}:`, error);
+      }
+    }
+  }
+
+  async function countWorkspaceFiles(): Promise<number> {
+    try {
+      const files = await vscode.workspace.findFiles(
+        "**/*",
+        "**/node_modules/**"
+      );
+      return files.length;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  // ========== Register Checkpoints Panel ==========
+  registerCheckpointsView(
+    context,
+    listCheckpoints,
+    getCheckpointDiff,
+    restoreCheckpoint
+  );
+
+  // ========== AI Commit Message Generator ==========
+  const generateCommitCmd = vscode.commands.registerCommand(
+    'kalpana.generateCommitMessage',
+    async () => {
+      try {
+        await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: '✨ Generating commit message...',
+            cancellable: false,
+          },
+          async () => {
+            const message = await generateCommitMessage();
+            
+            // Get git extension and set commit message
+            const git = await getGitRepository();
+            git.inputBox.value = message;
+            
+            vscode.window.showInformationMessage('✨ Commit message generated!');
+          }
+        );
+      } catch (error: any) {
+        vscode.window.showErrorMessage(`Failed to generate commit message: ${error.message}`);
+      }
+    }
+  );
+
+  context.subscriptions.push(generateCommitCmd);
+
+  // ========== Code Selection Context Commands ==========
+  // Create WebSocket message sender for code context
+  let sendToWebUI: ((message: any) => Promise<void>) | null = null;
+  let connectedClients: Set<WebSocket> = new Set();
+
+  // Track all connected WebSocket clients
+  wss.on('connection', (ws: WebSocket) => {
+    connectedClients.add(ws);
+    sendToWebUI = createWebUIMessageSender(ws);
+    setWebUIMessageSender(sendToWebUI);
+    
+    outputChannel.appendLine(`📡 WebSocket client connected, total clients: ${connectedClients.size}`);
+
+    ws.on('close', () => {
+      connectedClients.delete(ws);
+      outputChannel.appendLine(`📡 WebSocket client disconnected, remaining: ${connectedClients.size}`);
+      
+      // Update sendToWebUI to use another client if available
+      if (connectedClients.size > 0) {
+        const nextClient = Array.from(connectedClients)[0];
+        sendToWebUI = createWebUIMessageSender(nextClient);
+        setWebUIMessageSender(sendToWebUI);
+      } else {
+        sendToWebUI = null;
+        setWebUIMessageSender(null);
+      }
+    });
+  });
+
+  // Register selection menu (floating buttons)
+  registerSelectionMenu(context, sendToWebUI);
+
+  // Add to chat context
+  const addToChatCmd = vscode.commands.registerCommand(
+    'kalpana.addToChat',
+    async () => {
+      const context = getSelectedCodeContext();
+      if (!context) {
+        vscode.window.showWarningMessage('No code selected');
+        return;
+      }
+
+      // Get the current sendToWebUI (might have changed)
+      if (connectedClients.size === 0) {
+        vscode.window.showWarningMessage('Web UI not connected');
+        return;
+      }
+
+      // Send to all connected clients
+      const message = {
+        type: 'codeContext',
+        action: 'addToChat',
+        payload: context,
+      };
+
+      outputChannel.appendLine(`📤 Sending to web UI: ${JSON.stringify(message)}`);
+
+      for (const client of connectedClients) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify(message));
+        }
+      }
+
+      vscode.window.showInformationMessage('💬 Code added to chat context');
+    }
+  );
+
+  // Send to agent with instruction
+  const sendToAgentCmd = vscode.commands.registerCommand(
+    'kalpana.sendToAgent',
+    async () => {
+      const context = getSelectedCodeContext();
+      if (!context) {
+        vscode.window.showWarningMessage('No code selected');
+        return;
+      }
+
+      if (connectedClients.size === 0) {
+        vscode.window.showWarningMessage('Web UI not connected');
+        return;
+      }
+
+      // Show input box for instruction
+      const instruction = await vscode.window.showInputBox({
+        prompt: 'What should the agent do with this code?',
+        placeHolder: 'e.g., Add error handling, Refactor this function, Add tests',
+      });
+
+      if (!instruction) {
+        return;
+      }
+
+      const message = {
+        type: 'codeContext',
+        action: 'sendToAgent',
+        payload: {
+          ...context,
+          instruction,
+        },
+      };
+
+      outputChannel.appendLine(`📤 Sending to web UI: ${JSON.stringify(message)}`);
+
+      for (const client of connectedClients) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify(message));
+        }
+      }
+
+      vscode.window.showInformationMessage('✨ Sent to Kalpana Agent');
+    }
+  );
+
+  context.subscriptions.push(addToChatCmd, sendToAgentCmd);
 
   // Cleanup
   context.subscriptions.push({

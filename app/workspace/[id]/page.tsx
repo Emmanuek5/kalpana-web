@@ -116,51 +116,66 @@ export default function WorkspacePage({
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [inputMessage, setInputMessage] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [favoriteModels, setFavoriteModels] = useState<
     Array<{ id: string; name: string }>
   >([]);
   const [selectedModel, setSelectedModel] = useState<string>("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(
+  const [isStreaming, setIsStreaming] = React.useState(false);
+  const [expandedTools, setExpandedTools] = React.useState<Set<string>>(
     new Set()
   );
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  const [expandedReasoning, setExpandedReasoning] = React.useState<Set<string>>(
+    new Set()
+  );
+  const abortControllerRef = React.useRef<AbortController | null>(null);
   const [startupLogs, setStartupLogs] = useState<{
     stage: string;
     message: string;
-    progress: number;
   } | null>(null);
   const [hasNixFile, setHasNixFile] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [rebuildLogs, setRebuildLogs] = useState<string[]>([]);
   const [rebuildStage, setRebuildStage] = useState<string>("");
-  const [activeTab, setActiveTab] = useState<"ai" | "deployments">("ai");
+  const [inputMessage, setInputMessage] = useState<string>("");
+  const [activeTab, setActiveTab] = React.useState<"ai" | "deployments">("ai");
+  
+  // Chat management state
+  const [chats, setChats] = useState<Array<{
+    id: string;
+    title: string;
+    messageCount: number;
+    lastMessageAt: Date;
+  }>>([]);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
 
   // Handler for opening files in editor
-  const handleOpenFile = (filePath: string) => {
-    if (!workspace || !workspace.vscodePort) return;
+  const handleOpenFile = async (filePath: string) => {
+    if (!workspace || !workspace.agentPort) return;
 
     // Parse file path and line number (e.g., "src/app.ts:42")
     const [path, line] = filePath.split(":");
     const lineNumber = line ? parseInt(line, 10) : 1;
 
-    // Post message to VS Code iframe to open the file
-    const iframe = document.querySelector("iframe");
-    if (iframe && iframe.contentWindow) {
-      try {
-        iframe.contentWindow.postMessage(
-          {
-            type: "openFile",
-            path: path,
+    try {
+      // Send WebSocket message to open file in VS Code
+      const response = await fetch(`http://localhost:${workspace.agentPort}/vscode-command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'openFile',
+          payload: {
+            filePath: path,
             line: lineNumber,
           },
-          "*"
-        );
-      } catch (error) {
-        console.error("Error opening file:", error);
+        }),
+      });
+
+      if (!response.ok) {
+        console.error('Failed to open file:', await response.text());
       }
+    } catch (error) {
+      console.error("Error opening file:", error);
     }
   };
 
@@ -169,8 +184,12 @@ export default function WorkspacePage({
     const parts: React.ReactNode[] = [];
     let lastIndex = 0;
     
-    // Combined regex for both file paths and @mentions
-    const combinedRegex = /@([\w\-./()]+)|(?:File|Path|file|path):\s*([^\s,;]+)/g;
+    // Enhanced regex to match:
+    // 1. @mentions: @filename or @function()
+    // 2. File paths with keywords: File: path/to/file.ts or Path: src/app.tsx
+    // 3. Backtick file paths: `src/components/Button.tsx` or `app/page.tsx:42`
+    // 4. Common file patterns: src/file.ts, app/page.tsx, lib/utils.ts
+    const combinedRegex = /@([\w\-./()]+)|(?:File|Path|file|path):\s*([^\s,;]+)|`([^`]+\.[a-z]{2,4}(?::\d+)?)`|(?:^|\s)((?:src|app|lib|components|pages|api|utils|hooks|styles|public|container|docs|prisma|scripts)\/[\w\-./]+\.[a-z]{2,4}(?::\d+)?)/gi;
     let match;
 
     while ((match = combinedRegex.exec(text)) !== null) {
@@ -179,7 +198,7 @@ export default function WorkspacePage({
         parts.push(text.substring(lastIndex, match.index));
       }
 
-      // Check if it's an @mention (group 1) or file path (group 2)
+      // Check which group matched
       if (match[1]) {
         // @mention - style as badge
         const mentionText = match[1];
@@ -197,9 +216,9 @@ export default function WorkspacePage({
             {mentionText}
           </span>
         );
-      } else if (match[2]) {
-        // File path - clickable link
-        const filePath = match[2].trim();
+      } else if (match[2] || match[3] || match[4]) {
+        // File path - clickable link (from any of the file path patterns)
+        const filePath = (match[2] || match[3] || match[4]).trim();
         parts.push(
           <button
             key={`file-${match.index}`}
@@ -229,10 +248,17 @@ export default function WorkspacePage({
   useEffect(() => {
     fetchWorkspace();
     fetchUserSettings();
-    fetchMessages();
+    fetchChats();
     const interval = setInterval(fetchWorkspace, 5000);
     return () => clearInterval(interval);
   }, [resolvedParams.id]);
+  
+  // Fetch messages when chat changes
+  useEffect(() => {
+    if (currentChatId) {
+      fetchMessages(currentChatId);
+    }
+  }, [currentChatId]);
 
   // Keep `starting` state in sync with backend status so logs resume after navigation
   useEffect(() => {
@@ -297,9 +323,29 @@ export default function WorkspacePage({
     }
   };
 
-  const fetchMessages = async () => {
+  const fetchChats = async () => {
     try {
-      const res = await fetch(`/api/workspaces/${resolvedParams.id}/messages`);
+      const res = await fetch(`/api/workspaces/${resolvedParams.id}/chats`);
+      if (res.ok) {
+        const data = await res.json();
+        setChats(data.chats || []);
+        
+        // Select first chat or create new one if none exist
+        if (data.chats && data.chats.length > 0) {
+          setCurrentChatId(data.chats[0].id);
+        } else {
+          // Create first chat
+          await handleCreateChat();
+        }
+      }
+    } catch (error) {
+      console.error("Error fetching chats:", error);
+    }
+  };
+
+  const fetchMessages = async (chatId: string) => {
+    try {
+      const res = await fetch(`/api/workspaces/${resolvedParams.id}/messages?chatId=${chatId}`);
       if (res.ok) {
         const data = await res.json();
         setMessages(data.messages || []);
@@ -309,19 +355,85 @@ export default function WorkspacePage({
     }
   };
 
-  const saveMessage = async (message: Message) => {
+  const saveMessage = async (message: Message): Promise<string | null> => {
+    if (!currentChatId) return null;
+    
     try {
-      await fetch(`/api/workspaces/${resolvedParams.id}/messages`, {
+      const response = await fetch(`/api/workspaces/${resolvedParams.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          chatId: currentChatId,
           role: message.role,
           parts: message.parts,
         }),
       });
+      
+      const data = await response.json();
+      
+      // Auto-generate chat title from first user message
+      if (message.role === "user" && messages.length === 0) {
+        const textPart = message.parts.find(p => p.type === "text") as any;
+        if (textPart?.text) {
+          const title = generateChatTitle(textPart.text);
+          await updateChatTitle(currentChatId, title);
+        }
+      }
+      
+      // Return the database-generated message ID
+      return data.message?.id || null;
     } catch (error) {
       console.error("Error saving message:", error);
+      return null;
     }
+  };
+  
+  const generateChatTitle = (firstMessage: string): string => {
+    // Take first 50 chars or until first newline
+    let title = firstMessage.split('\n')[0].substring(0, 50);
+    if (firstMessage.length > 50) {
+      title += "...";
+    }
+    return title || "New Chat";
+  };
+  
+  const updateChatTitle = async (chatId: string, title: string) => {
+    try {
+      await fetch(`/api/workspaces/${resolvedParams.id}/chats/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      
+      // Update local state
+      setChats(chats.map(c => c.id === chatId ? { ...c, title } : c));
+    } catch (error) {
+      console.error("Error updating chat title:", error);
+    }
+  };
+  
+  const handleCreateChat = async () => {
+    try {
+      const res = await fetch(`/api/workspaces/${resolvedParams.id}/chats`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "New Chat" }),
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        setChats([data.chat, ...chats]);
+        setCurrentChatId(data.chat.id);
+        setMessages([]); // Clear messages for new chat
+      }
+    } catch (error) {
+      console.error("Error creating chat:", error);
+    }
+  };
+  
+  const handleSelectChat = async (chatId: string) => {
+    setCurrentChatId(chatId);
+    // Messages will be fetched by useEffect
   };
 
   const clearChatHistory = async () => {
@@ -547,9 +659,10 @@ export default function WorkspacePage({
     setInputMessage("");
     setIsStreaming(true);
 
-    // Add user message
+    // Add user message with temporary ID
+    const tempId = Date.now().toString();
     const userMsg: Message = {
-      id: Date.now().toString(),
+      id: tempId,
       role: "user",
       parts: [{ type: "text", text: userInput }],
       createdAt: new Date(),
@@ -557,8 +670,33 @@ export default function WorkspacePage({
 
     setMessages((prev) => [...prev, userMsg]);
 
-    // Save user message to database
-    await saveMessage(userMsg);
+    // Save user message to database and get the database ID
+    const dbMessageId = await saveMessage(userMsg);
+
+    // Update message with database ID
+    if (dbMessageId) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempId ? { ...m, id: dbMessageId } : m))
+      );
+    }
+
+    // Create checkpoint before AI processes the message (using database ID)
+    if (dbMessageId) {
+      try {
+        await fetch(`/api/workspaces/${resolvedParams.id}/checkpoints`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messageId: dbMessageId,
+            previewText: userInput.substring(0, 100),
+          }),
+        });
+        console.log("📸 Checkpoint created for message:", dbMessageId);
+      } catch (error) {
+        console.error("Failed to create checkpoint:", error);
+        // Continue even if checkpoint fails
+      }
+    }
 
     // Create empty assistant message
     const assistantMsgId = (Date.now() + 1).toString();
@@ -572,11 +710,15 @@ export default function WorkspacePage({
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
+      // Create new AbortController for this request
+      abortControllerRef.current = new AbortController();
+      
       const res = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspaceId: resolvedParams.id,
+          chatId: currentChatId,
           messages: [...messages, userMsg].map((m) => ({
             role: m.role,
             content: m.parts
@@ -587,6 +729,7 @@ export default function WorkspacePage({
           model: selectedModel,
           images: images || [], // Include images if provided
         }),
+        signal: abortControllerRef.current.signal,
       });
 
       if (!res.ok) {
@@ -671,6 +814,7 @@ export default function WorkspacePage({
 
               // Handle tool calls (AI SDK v5 format - type "9" is tool-call)
               if (data.type === "tool-call" || data.type === "9") {
+                console.log("🔧 Tool call received:", data);
                 // Reset text tracking - next text delta should create a new text part AFTER this tool
                 currentText = "";
                 currentTextPartIndex = -1;
@@ -687,13 +831,17 @@ export default function WorkspacePage({
                     );
 
                     if (!existingTool && data.toolCallId && data.toolName) {
+                      // Add tool with "input-streaming" state to show it's executing
+                      console.log(`✅ Adding tool to message: ${data.toolName} (${data.toolCallId})`);
                       lastMsg.parts.push({
                         type: "tool",
                         toolCallId: data.toolCallId,
                         toolName: data.toolName,
-                        state: "input-available",
+                        state: "input-streaming",
                         input: data.args || {},
                       });
+                    } else {
+                      console.log(`⚠️ Tool already exists or missing data:`, { existingTool, data });
                     }
                   }
                   return updated;
@@ -702,6 +850,7 @@ export default function WorkspacePage({
 
               // Handle tool results (AI SDK v5 format - type "a" is tool-result)
               if (data.type === "tool-result" || data.type === "a") {
+                console.log("✅ Tool result received:", data);
                 // Reset text tracking - next text delta should create a new text part AFTER this tool
                 currentText = "";
                 currentTextPartIndex = -1;
@@ -716,6 +865,7 @@ export default function WorkspacePage({
                         (p as any).toolCallId === data.toolCallId
                     );
                     if (toolPart) {
+                      console.log(`✅ Updating tool result: ${toolPart.toolName} → output-available`);
                       toolPart.state = "output-available";
                       toolPart.output = data.result;
 
@@ -793,25 +943,127 @@ export default function WorkspacePage({
           }
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error sending message:", error);
-      setMessages((prev) => {
-        const updated = [...prev];
-        const lastMsg = updated[updated.length - 1];
-        if (lastMsg.role === "assistant") {
-          lastMsg.parts.push({
-            type: "checkpoint",
-            title: "Error occurred",
-            description: "Failed to process request. Please try again.",
-            status: "error",
-          });
-        }
-        return updated;
-      });
+      
+      // Check if it was aborted
+      if (error.name === 'AbortError') {
+        console.log("Request was aborted by user");
+        setMessages((prev) => {
+          const updated = [...prev];
+          const lastMsg = updated[updated.length - 1];
+          if (lastMsg.role === "assistant") {
+            lastMsg.parts.push({
+              type: "checkpoint",
+              title: "Generation stopped",
+              description: "Generation was stopped by user.",
+              status: "error",
+            });
+          }
+          return updated;
+        });
+      } else {
+        setMessages((prev) => {
+          const updated = [...prev];
+          const lastMsg = updated[updated.length - 1];
+          if (lastMsg.role === "assistant") {
+            lastMsg.parts.push({
+              type: "checkpoint",
+              title: "Error occurred",
+              description: "Failed to process request. Please try again.",
+              status: "error",
+            });
+          }
+          return updated;
+        });
+      }
     } finally {
       setIsStreaming(false);
+      abortControllerRef.current = null;
     }
   };
+
+  const handleStopGeneration = React.useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      console.log("🛑 Stopping generation...");
+    }
+  }, []);
+
+  // Handle code context messages from VS Code extension
+  React.useEffect(() => {
+    if (!workspace || !workspace.agentPort) {
+      return;
+    }
+
+    // Connect to WebSocket on the workspace's agent port
+    const ws = new WebSocket(`ws://localhost:${workspace.agentPort}`);
+
+    ws.onopen = () => {
+      console.log(`Connected to VS Code extension WebSocket on port ${workspace.agentPort}`);
+    };
+
+    ws.onmessage = (event) => {
+      console.log('📨 WebSocket message received:', event.data);
+      
+      try {
+        const data = JSON.parse(event.data);
+        console.log('📦 Parsed message:', data);
+        
+        if (data.type === 'codeContext') {
+          const { action, payload } = data;
+          console.log('🎯 Code context action:', action, payload);
+          
+          if (action === 'addToChat') {
+            // Format code context with @filepath:LN format (without code, agent will use readFileLines tool)
+            const context = `@${payload.filePath}:${payload.lineStart}-${payload.lineEnd}\n\n`;
+            
+            // Add to input
+            setInputMessage(prev => {
+              console.log('✅ Adding code to input, current:', prev.length, 'chars');
+              return prev + context;
+            });
+            
+            // Show notification
+            console.log('💬 Code added to chat context:', payload.filePath);
+            
+            // Focus the input
+            setTimeout(() => {
+              const textarea = document.querySelector('textarea');
+              if (textarea) {
+                textarea.focus();
+                textarea.scrollTop = textarea.scrollHeight;
+                console.log('✅ Input focused and scrolled');
+              }
+            }, 100);
+          } else if (action === 'sendToAgent') {
+            // Format message with instruction and @filepath:LN format (without code)
+            const message = `${payload.instruction}\n\n@${payload.filePath}:${payload.lineStart}-${payload.lineEnd}`;
+            
+            // Show notification
+            console.log('✨ Sending to agent:', payload.instruction);
+            
+            // Send immediately
+            handleSendMessage(message);
+          }
+        }
+      } catch (error) {
+        console.error('❌ Error handling WebSocket message:', error);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    ws.onclose = () => {
+      console.log('Disconnected from VS Code extension WebSocket');
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [workspace?.agentPort]);
 
   const getToolDisplayName = (toolName: string): string => {
     const names: Record<string, string> = {
@@ -866,9 +1118,10 @@ export default function WorkspacePage({
     );
   }
 
+
   if (!workspace) {
     return (
-      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-8">
+      <div className="h-screen bg-black flex flex-col items-center justify-center p-8">
         <div className="text-center max-w-md">
           <div className="mb-6 text-6xl">404</div>
           <h2 className="text-2xl font-semibold mb-3 text-zinc-200">
@@ -889,6 +1142,8 @@ export default function WorkspacePage({
       </div>
     );
   }
+
+
 
   return (
     <>
@@ -915,7 +1170,7 @@ export default function WorkspacePage({
           workspaceId={workspace.id}
         />
 
-        {/* Main Content - Proper Flex Layout */}
+        {/* Main Content - Proper Flex Layout */
         <div className="relative z-10 flex-1 flex overflow-hidden">
           {/* Editor Area */}
           <div className="flex-1 bg-gradient-to-br from-zinc-950 to-black">
@@ -960,6 +1215,7 @@ export default function WorkspacePage({
               {activeTab === "ai" ? (
                 <AIAgentPanel
                   workspaceId={workspace.id}
+                  isWorkSpaceRunning={workspace.status === "RUNNING"}
                   messages={messages}
                   input={inputMessage}
                   setInput={setInputMessage}
@@ -974,7 +1230,12 @@ export default function WorkspacePage({
                   setExpandedReasoning={setExpandedReasoning}
                   handleOpenFile={handleOpenFile}
                   renderTextWithFileLinks={renderTextWithFileLinks}
-                  onClearHistory={clearChatHistory}
+                  onStopGeneration={handleStopGeneration}
+                  chats={chats}
+                  currentChatId={currentChatId}
+                  currentChatTitle={chats.find(c => c.id === currentChatId)?.title || "New Chat"}
+                  onSelectChat={handleSelectChat}
+                  onCreateChat={handleCreateChat}
                 />
               ) : (
                 <DeploymentsPanel workspaceId={workspace.id} />
@@ -982,6 +1243,7 @@ export default function WorkspacePage({
             </div>
           </div>
         </div>
+}
       </div>
     </>
   );

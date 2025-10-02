@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 
-// GET /api/workspaces/:id/messages - Get all messages for a workspace
+// GET /api/workspaces/:id/messages - Get all messages for a chat
 export async function GET(
   request: NextRequest,
   context: { params: Promise<{ id: string }> }
@@ -14,27 +14,36 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { id } = await context.params;
+    const { id: workspaceId } = await context.params;
+    const { searchParams } = new URL(request.url);
+    const chatId = searchParams.get("chatId");
 
-    // Verify workspace belongs to user
-    const workspace = await prisma.workspace.findFirst({
-      where: {
-        id,
-        userId: session.user.id,
-      },
-    });
-
-    if (!workspace) {
+    if (!chatId) {
       return NextResponse.json(
-        { error: "Workspace not found" },
-        { status: 404 }
+        { error: "chatId is required" },
+        { status: 400 }
       );
     }
 
-    // Get all messages for this workspace
+    // Verify chat belongs to user's workspace
+    const chat = await prisma.chat.findFirst({
+      where: {
+        id: chatId,
+        workspaceId,
+        workspace: {
+          userId: session.user.id,
+        },
+      },
+    });
+
+    if (!chat) {
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 });
+    }
+
+    // Get all messages for this chat
     const messages = await prisma.message.findMany({
       where: {
-        workspaceId: id,
+        chatId,
       },
       orderBy: {
         createdAt: "asc",
@@ -71,25 +80,16 @@ export async function POST(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { id } = await context.params;
+    const { id: workspaceId } = await context.params;
+    const body = await request.json();
+    const { chatId, role, parts } = body;
 
-    // Verify workspace belongs to user
-    const workspace = await prisma.workspace.findFirst({
-      where: {
-        id,
-        userId: session.user.id,
-      },
-    });
-
-    if (!workspace) {
+    if (!chatId) {
       return NextResponse.json(
-        { error: "Workspace not found" },
-        { status: 404 }
+        { error: "chatId is required" },
+        { status: 400 }
       );
     }
-
-    const body = await request.json();
-    const { role, parts } = body;
 
     if (!role || !parts) {
       return NextResponse.json(
@@ -98,13 +98,34 @@ export async function POST(
       );
     }
 
+    // Verify chat belongs to user's workspace
+    const chat = await prisma.chat.findFirst({
+      where: {
+        id: chatId,
+        workspaceId,
+        workspace: {
+          userId: session.user.id,
+        },
+      },
+    });
+
+    if (!chat) {
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 });
+    }
+
     // Create the message
     const message = await prisma.message.create({
       data: {
-        workspaceId: id,
+        chatId,
         role,
         content: JSON.stringify(parts),
       },
+    });
+
+    // Update chat's lastMessageAt
+    await prisma.chat.update({
+      where: { id: chatId },
+      data: { lastMessageAt: new Date() },
     });
 
     return NextResponse.json({

@@ -1,5 +1,7 @@
+"use client";
+
 import React from "react";
-import { Brain } from "lucide-react";
+import { Brain, User, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -15,13 +17,20 @@ export const MessageBubble = React.memo(
     expandedTools,
     setExpandedTools,
     renderTextWithFileLinks,
+    onRestore,
+    showRestore = false,
   }: {
     message: Message;
     expandedTools: Set<string>;
     setExpandedTools: React.Dispatch<React.SetStateAction<Set<string>>>;
     renderTextWithFileLinks: (text: string) => React.ReactNode;
+    onRestore?: (messageId: string) => void;
+    showRestore?: boolean;
   }) => {
-    // Pre-compute user message text once
+    const [isExpanded, setIsExpanded] = React.useState(false);
+    const [isHovered, setIsHovered] = React.useState(false);
+
+    // Build user message text
     const userText = React.useMemo(
       () =>
         message.role === "user"
@@ -32,6 +41,13 @@ export const MessageBubble = React.memo(
           : "",
       [message]
     );
+
+    // Max length before truncation
+    const MAX_LENGTH = 300;
+    const isLongUserMessage = userText.length > MAX_LENGTH;
+    const previewText = isLongUserMessage
+      ? userText.slice(0, MAX_LENGTH) + "..."
+      : userText;
 
     const markdownComponents = React.useMemo(
       () => ({
@@ -44,35 +60,33 @@ export const MessageBubble = React.memo(
           };
           const text = getText(children);
           return (
-            <p className="mb-3 leading-relaxed">
+            <p className="mb-3 leading-relaxed text-zinc-200">
               {renderTextWithFileLinks(text)}
             </p>
           );
         },
         code: CodeBlock,
         pre: ({ children }: any) => (
-          <pre className="bg-zinc-900/50 border border-zinc-800/30 rounded-lg p-3 my-2 overflow-x-auto">
+          <pre className="bg-zinc-900/70 border border-zinc-800/50 rounded-xl p-4 my-3 overflow-x-auto text-sm">
             {children}
           </pre>
         ),
         ul: ({ children }: any) => (
-          <ul className="list-disc list-inside mb-3 space-y-1">{children}</ul>
+          <ul className="list-disc list-inside mb-3 space-y-1 text-zinc-300">
+            {children}
+          </ul>
         ),
         ol: ({ children }: any) => (
-          <ol className="list-decimal list-inside mb-3 space-y-1">
+          <ol className="list-decimal list-inside mb-3 space-y-1 text-zinc-300">
             {children}
           </ol>
         ),
-        li: ({ children }: any) => (
-          <li className="text-zinc-400">{children}</li>
-        ),
+        li: ({ children }: any) => <li className="text-zinc-300">{children}</li>,
         h1: ({ children }: any) => (
-          <h1 className="text-lg font-bold text-zinc-100 mb-2 mt-4">
-            {children}
-          </h1>
+          <h1 className="text-lg font-bold text-white mb-2 mt-4">{children}</h1>
         ),
         h2: ({ children }: any) => (
-          <h2 className="text-base font-semibold text-zinc-100 mb-2 mt-3">
+          <h2 className="text-base font-semibold text-white mb-2 mt-3">
             {children}
           </h2>
         ),
@@ -82,7 +96,7 @@ export const MessageBubble = React.memo(
           </h3>
         ),
         blockquote: ({ children }: any) => (
-          <blockquote className="border-l-2 border-emerald-500/30 pl-3 py-1 my-2 text-zinc-400 italic">
+          <blockquote className="border-l-2 border-emerald-500/40 pl-3 py-1 my-2 text-zinc-400 italic">
             {children}
           </blockquote>
         ),
@@ -105,13 +119,12 @@ export const MessageBubble = React.memo(
       [setExpandedTools]
     );
 
-    // Pre-compute assistant parts rendering to avoid recompute
     const assistantParts = React.useMemo(() => {
       return message.parts.map((part, partIdx) => {
         if (part.type === "text" && (part as any).text) {
           const textPart = part as Extract<MessagePart, { type: "text" }>;
           return (
-            <div key={partIdx} className="text-sm text-zinc-300">
+            <div key={partIdx} className="text-sm text-zinc-200">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeHighlight]}
@@ -123,10 +136,7 @@ export const MessageBubble = React.memo(
           );
         }
 
-        if (
-          part.type === "tool" &&
-          (part as any).state === "output-available"
-        ) {
+        if (part.type === "tool") {
           const toolPart = part as Extract<MessagePart, { type: "tool" }>;
           return (
             <ToolCall
@@ -143,31 +153,69 @@ export const MessageBubble = React.memo(
     }, [message.parts, expandedTools, handleToggleTool, markdownComponents]);
 
     return (
-      <div className="space-y-3">
-        {message.role === "user" ? (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2 mb-1">
-              <div className="h-5 w-5 rounded-md bg-zinc-800/50 flex items-center justify-center">
-                <span className="text-[10px] text-zinc-400">You</span>
-              </div>
-            </div>
-            <div className="text-sm text-zinc-200 leading-relaxed">
-              {userText}
-            </div>
+      <div 
+        className="w-full space-y-2"
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-zinc-500">
+          <div className="flex items-center gap-2">
+          {message.role === "user" ? (
+            <User className="h-3 w-3 text-blue-400" />
+          ) : (
+            <Brain className="h-3 w-3 text-emerald-400" />
+          )}
+            <span>{message.role === "user" ? "You" : "Agent"}</span>
           </div>
-        ) : (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 mb-1">
-              <div className="h-5 w-5 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
-                <Brain className="h-3 w-3 text-emerald-500" />
+          
+          {/* Restore Button (only for user messages with checkpoint) */}
+          {message.role === "user" && showRestore && onRestore && isHovered && (
+            <button
+              onClick={() => onRestore(message.id)}
+              className="flex items-center gap-1.5 px-2 py-1 text-xs text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 hover:border-amber-500/30 rounded-md transition-all"
+              title="Restore to this checkpoint"
+            >
+              <RotateCcw className="h-3 w-3" />
+              <span>Restore</span>
+            </button>
+          )}
+        </div>
+
+        {/* Bubble */}
+        <div
+          className={`w-full rounded-xl px-4 py-3 shadow-sm text-sm leading-relaxed ${
+            message.role === "user"
+              ? "bg-blue-500/10 border border-blue-500/20 text-blue-100"
+              : "bg-zinc-800/60 border border-zinc-700 text-zinc-100"
+          }`}
+        >
+          {message.role === "user" ? (
+            <>
+              <div>
+                {isExpanded || !isLongUserMessage ? userText : previewText}
               </div>
-              <span className="text-[10px] text-zinc-500 font-medium">
-                Agent
-              </span>
-            </div>
-            {assistantParts}
-          </div>
-        )}
+              {isLongUserMessage && (
+                <button
+                  onClick={() => setIsExpanded((prev) => !prev)}
+                  className="flex items-center gap-1 text-xs text-blue-400 mt-2 hover:text-blue-300"
+                >
+                  {isExpanded ? (
+                    <>
+                      <ChevronUp className="h-3 w-3" /> Show less
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="h-3 w-3" /> Show more
+                    </>
+                  )}
+                </button>
+              )}
+            </>
+          ) : (
+            <div className="space-y-3">{assistantParts}</div>
+          )}
+        </div>
       </div>
     );
   }

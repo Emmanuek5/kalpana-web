@@ -10,7 +10,8 @@ export const CodeBlock = React.memo(
         if (node.props && node.props.children) {
           return extractText(node.props.children);
         }
-        return JSON.stringify(node, null, 2);
+        // Fallback for unknown objects - return empty string or toString
+        return node.toString?.() !== "[object Object]" ? node.toString() : "";
       }
       return "";
     }, []);

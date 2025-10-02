@@ -101,6 +101,51 @@ export const read_file = tool({
   },
 });
 
+export const read_file_lines = tool({
+  description: "Read specific lines from a file. Useful when you have a file reference like @filepath:10-20 and need to see the actual code.",
+  inputSchema: z.object({
+    path: z.string().describe("Path to the file relative to workspace root"),
+    startLine: z.number().describe("Starting line number (1-indexed)"),
+    endLine: z.number().describe("Ending line number (1-indexed)"),
+  }),
+  execute: async ({ path: filePath, startLine, endLine }) => {
+    const fullPath = sanitizePath(filePath);
+    console.log(`[Tool] read_file_lines: ${fullPath}:${startLine}-${endLine}`);
+
+    if (!existsSync(fullPath)) {
+      return { error: "File not found" };
+    }
+
+    const content = await readFile(fullPath, "utf-8");
+    const lines = content.split('\n');
+    
+    // Validate line numbers
+    if (startLine < 1 || endLine < 1) {
+      return { 
+        error: "Line numbers must be >= 1",
+      };
+    }
+    
+    if (startLine > endLine) {
+      return { 
+        error: "Start line must be <= end line",
+      };
+    }
+    
+    // Extract the requested lines (convert to 0-indexed)
+    const selectedLines = lines.slice(startLine - 1, endLine);
+    const selectedContent = selectedLines.join('\n');
+    
+    return { 
+      content: selectedContent,
+      path: filePath,
+      startLine,
+      endLine,
+      totalLines: lines.length,
+    };
+  },
+});
+
 export const write_file = tool({
   description:
     "Write content to a file in the workspace. Creates parent directories if needed.",
@@ -692,6 +737,7 @@ export const run_tests = tool({
  */
 export const agentTools = {
   read_file,
+  read_file_lines,
   write_file,
   list_directory,
   search_files,

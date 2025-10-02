@@ -13,7 +13,10 @@ RUN nix-env -iA nixpkgs.code-server \
     nixpkgs.curl \
     nixpkgs.wget \
     nixpkgs.htop \
-    nixpkgs.gnused
+    nixpkgs.gnused \
+    nixpkgs.gawk \
+    nixpkgs.findutils \
+    nixpkgs.coreutils
 
 # Create workspace directory
 RUN mkdir -p /workspace
@@ -53,6 +56,7 @@ RUN sed -i 's/\r$//' /start.sh && chmod +x /start.sh && \
 EXPOSE 8080 3001
 
 # Set environment variables
+# Note: PASSWORD is set at runtime via docker run -e, not hardcoded here
 ENV PASSWORD=""
 ENV WORKSPACE_ID=""
 

@@ -60,16 +60,28 @@ export async function PATCH(req: NextRequest) {
 
     const updateData: any = {};
 
+    // Only update API key if explicitly provided (not undefined)
+    // Empty string or null will clear the key
     if (openrouterApiKey !== undefined) {
       updateData.openrouterApiKey = openrouterApiKey || null;
     }
 
+    // Only update favorite models if provided
     if (favoriteModels !== undefined) {
       updateData.favoriteModels = favoriteModels;
     }
 
+    // Only update default model if provided
     if (defaultModel !== undefined) {
       updateData.defaultModel = defaultModel || null;
+    }
+
+    // Only update if there's something to update
+    if (Object.keys(updateData).length === 0) {
+      return NextResponse.json(
+        { error: "No fields to update" },
+        { status: 400 }
+      );
     }
 
     const user = await prisma.user.update({
