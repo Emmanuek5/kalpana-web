@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Sidebar } from "@/components/sidebar";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Rocket,
   ExternalLink,
@@ -23,6 +24,7 @@ import {
   GitBranch,
 } from "lucide-react";
 import { NewDeploymentDialog } from "@/components/deployments/new-deployment-dialog";
+import { useTeam } from "@/lib/team-context";
 import { NotificationBell } from "@/components/workspace/notification-bell";
 
 interface Domain {
@@ -75,15 +77,19 @@ export default function DeploymentsPage() {
     null
   );
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const { currentTeam } = useTeam();
 
   useEffect(() => {
     fetchAllDeployments();
-  }, []);
+  }, [currentTeam]);
 
   const fetchAllDeployments = async () => {
     try {
       // Fetch all deployments (standalone + workspace-based)
-      const deploymentsRes = await fetch("/api/deployments");
+      const url = currentTeam 
+        ? `/api/deployments?teamId=${currentTeam.id}`
+        : "/api/deployments";
+      const deploymentsRes = await fetch(url);
       if (!deploymentsRes.ok) throw new Error("Failed to fetch deployments");
 
       const data = await deploymentsRes.json();
@@ -180,20 +186,6 @@ export default function DeploymentsPage() {
     return null;
   };
 
-  if (loading) {
-    return (
-      <div className="flex h-screen bg-zinc-950 overflow-hidden">
-        <div className="fixed inset-0 bg-[linear-gradient(to_right,#18181b_1px,transparent_1px),linear-gradient(to_bottom,#18181b_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_0%,#000_70%,transparent_110%)] pointer-events-none -z-10" />
-
-        <Sidebar />
-
-        <div className="flex-1 flex items-center justify-center">
-          <Loader2 className="h-8 w-8 text-emerald-500 animate-spin" />
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="flex h-screen bg-zinc-950 overflow-hidden">
       {/* Background */}
@@ -205,7 +197,7 @@ export default function DeploymentsPage() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Top Bar */}
-        <div className="border-b border-zinc-800/50 flex items-center justify-between px-6 py-4 bg-zinc-950/50 backdrop-blur-sm">
+        <div className="border-b border-zinc-800/50 flex items-center justify-between px-6 py-4 bg-zinc-950/50 backdrop-blur-sm relative z-50">
           <div>
             <h1 className="text-lg font-medium text-zinc-100">Deployments</h1>
             <p className="text-sm text-zinc-500 mt-0.5">
@@ -231,7 +223,7 @@ export default function DeploymentsPage() {
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-6">
           <div className="max-w-6xl mx-auto">
-            {deployments.length === 0 ? (
+            {deployments.length === 0 && !loading ? (
               <Card className="bg-zinc-900/50 border-zinc-800 p-12">
                 <div className="text-center">
                   <Rocket className="h-12 w-12 text-zinc-700 mx-auto mb-4" />
@@ -250,6 +242,32 @@ export default function DeploymentsPage() {
                   </Button>
                 </div>
               </Card>
+            ) : loading ? (
+              <div className="space-y-4">
+                {[1, 2, 3].map((i) => (
+                  <Card key={i} className="bg-zinc-900/50 border-zinc-800 p-6">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-2">
+                          <Skeleton className="h-6 w-48 bg-zinc-800" />
+                          <Skeleton className="h-6 w-20 bg-zinc-800" />
+                        </div>
+                        <Skeleton className="h-4 w-32 mb-4 bg-zinc-800" />
+                        <div className="grid grid-cols-3 gap-4 mb-4">
+                          <Skeleton className="h-16 bg-zinc-800" />
+                          <Skeleton className="h-16 bg-zinc-800" />
+                          <Skeleton className="h-16 bg-zinc-800" />
+                        </div>
+                        <Skeleton className="h-4 w-full bg-zinc-800" />
+                      </div>
+                      <div className="flex gap-2">
+                        <Skeleton className="h-9 w-24 bg-zinc-800" />
+                        <Skeleton className="h-9 w-9 bg-zinc-800" />
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
             ) : (
               <div className="space-y-4">
                 {deployments.map((deployment) => {

@@ -29,11 +29,16 @@ import {
   Zap,
   Code2,
   Rocket,
+  Coins,
+  TrendingUp,
+  Users,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { NotificationBell } from "@/components/workspace/notification-bell";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useTeam } from "@/lib/team-context";
+import { toast } from "sonner";
 
 interface Workspace {
   id: string;
@@ -45,6 +50,7 @@ interface Workspace {
   lastAccessedAt: string;
   vscodePort?: number;
   agentPort?: number;
+  teamId?: string;
 }
 
 interface Deployment {
@@ -55,6 +61,7 @@ interface Deployment {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const { currentTeam } = useTeam();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,17 +73,24 @@ export default function DashboardPage() {
   const [selectedWorkspace, setSelectedWorkspace] = useState<Workspace | null>(
     null
   );
+  const [loadingCredits, setLoadingCredits] = useState(true);
   const [deleting, setDeleting] = useState(false);
   const [editedName, setEditedName] = useState("");
   const [editedDescription, setEditedDescription] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleteVolume, setDeleteVolume] = useState(false);
+  const [credits, setCredits] = useState<{
+    remaining: number;
+    totalUsage: number;
+  } | null>(null);
+  const [loadingStats, setLoadingStats] = useState(true);
 
   useEffect(() => {
     fetchSession();
     fetchWorkspaces();
     fetchDeployments();
-  }, []);
+    fetchCredits();
+  }, [currentTeam]);
 
   const fetchSession = async () => {
     try {
@@ -92,7 +106,10 @@ export default function DashboardPage() {
 
   const fetchWorkspaces = async () => {
     try {
-      const res = await fetch("/api/workspaces");
+      const url = currentTeam
+        ? `/api/workspaces?teamId=${currentTeam.id}`
+        : "/api/workspaces";
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         setWorkspaces(data);
@@ -106,7 +123,10 @@ export default function DashboardPage() {
 
   const fetchDeployments = async () => {
     try {
-      const res = await fetch("/api/deployments");
+      const url = currentTeam
+        ? `/api/deployments?teamId=${currentTeam.id}`
+        : "/api/deployments";
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         setDeployments(data.deployments);
@@ -115,6 +135,20 @@ export default function DashboardPage() {
       console.error("Failed to fetch deployments:", error);
     } finally {
       setLoadingDeployments(false);
+    }
+  };
+
+  const fetchCredits = async () => {
+    try {
+      const res = await fetch("/api/openrouter/credits");
+      if (res.ok) {
+        const data = await res.json();
+        setCredits(data);
+      }
+    } catch (error) {
+      console.error("Failed to fetch credits:", error);
+    } finally {
+      setLoadingCredits(false);
     }
   };
 
@@ -143,12 +177,13 @@ export default function DashboardPage() {
       if (res.ok) {
         await fetchWorkspaces();
         setSettingsModalOpen(false);
+        toast.success("Workspace updated successfully!");
       } else {
-        alert("Failed to update workspace");
+        toast.error("Failed to update workspace");
       }
     } catch (error) {
       console.error("Error updating workspace:", error);
-      alert("Failed to update workspace");
+      toast.error("Failed to update workspace");
     } finally {
       setSaving(false);
     }
@@ -176,12 +211,13 @@ export default function DashboardPage() {
       if (res.ok) {
         await fetchWorkspaces();
         setDeleteModalOpen(false);
+        toast.success("Workspace deleted");
       } else {
-        alert("Failed to delete workspace");
+        toast.error("Failed to delete workspace");
       }
     } catch (error) {
       console.error("Error deleting workspace:", error);
-      alert("Failed to delete workspace");
+      toast.error("Failed to delete workspace");
     } finally {
       setDeleting(false);
     }
@@ -223,11 +259,11 @@ export default function DashboardPage() {
         } else {
           // Revert on failure
           await refreshWorkspace(id);
-          alert("Failed to stop workspace");
+          toast.error("Failed to stop workspace");
         }
       } catch (e) {
         await refreshWorkspace(id);
-        alert("Failed to stop workspace");
+        toast.error("Failed to stop workspace");
       }
       return;
     }
@@ -281,28 +317,20 @@ export default function DashboardPage() {
         }
         // Final refresh to sync ports/status
         await refreshWorkspace(id);
+        toast.success("Workspace started!");
       } else {
         await refreshWorkspace(id);
-        if (!res.ok) alert("Failed to start workspace");
+        if (!res.ok) toast.error("Failed to start workspace");
       }
     } catch (e) {
       setWorkspaces((prev) =>
         prev.map((w) => (w.id === id ? { ...w, status: "ERROR" } : w))
       );
-      alert("Failed to start workspace");
+      toast.error("Failed to start workspace");
     }
   };
 
-  if (!session) {
-    return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
-        <div className="relative">
-          <div className="absolute inset-0 blur-3xl bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 animate-pulse" />
-          <Loader2 className="h-10 w-10 text-emerald-400 animate-spin relative z-10" />
-        </div>
-      </div>
-    );
-  }
+
 
   const statusConfig = {
     STOPPED: {
@@ -343,7 +371,7 @@ export default function DashboardPage() {
 
       <div className="flex-1 flex flex-col overflow-hidden relative z-10">
         {/* Minimal Top Bar */}
-        <div className="border-b border-zinc-800/50 flex items-center justify-between px-6 py-4 bg-zinc-950/50 backdrop-blur-sm">
+        <div className="border-b border-zinc-800/50 flex items-center justify-between px-6 py-4 bg-zinc-950/50 backdrop-blur-sm relative z-50">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-medium text-zinc-100">Workspaces</h1>
             <Badge
@@ -379,13 +407,40 @@ export default function DashboardPage() {
                     <div className="flex-1">
                       <div className="flex items-center gap-3 mb-2">
                         <h2 className="text-3xl font-bold bg-gradient-to-r from-zinc-100 via-emerald-100 to-zinc-100 bg-clip-text text-transparent">
-                          Welcome back, {session?.user?.name || session?.user?.email?.split('@')[0] || 'User'}!
+                          Welcome back, <Suspense fallback={<Skeleton className="h-4 w-20" />}>
+                            {session?.user?.name || session?.user?.email?.split('@')[0]}
+                          </Suspense>!
                         </h2>
                         <Sparkles className="h-6 w-6 text-emerald-400 animate-pulse" />
                       </div>
-                      <p className="text-zinc-400 text-base">
+                      <p className="text-zinc-400 text-base mb-4">
                         Your AI-powered development environment is ready
                       </p>
+                      
+                      {/* Credits Display */}
+                      <div className="flex items-center gap-6 text-sm mt-18">
+                        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-900/50 border border-zinc-800/50">
+                          <Coins className="h-4 w-4 text-emerald-400" />
+                          <span className="text-zinc-500">Credits:</span>
+                          {loadingCredits ? (
+                            <Skeleton className="h-4 w-16 bg-zinc-800" />
+                          ) : credits ? (
+                            <span className="font-bold text-emerald-400">${credits.remaining.toFixed(2)}</span>
+                          ) : (
+                            <span className="text-zinc-600">Not set</span>
+                          )}
+                        </div>
+                        {credits && !loadingCredits && (
+                          <>
+                            <div className="text-zinc-600">
+                              Used: <span className="text-zinc-500">${credits.totalUsage.toFixed(2)}</span>
+                            </div>
+                            <div className="text-zinc-600">
+                              Total: <span className="text-zinc-400">${credits.totalUsage.toFixed(2)}</span>
+                            </div>
+                          </>
+                        )}
+                      </div>
                     </div>
                     
                     {/* Mini Stats Table */}
@@ -519,6 +574,15 @@ export default function DashboardPage() {
                                 <h3 className="text-base font-semibold text-zinc-100 group-hover:text-emerald-300 transition-colors truncate">
                                   {workspace.name}
                                 </h3>
+                                {workspace.teamId && (
+                                  <Badge
+                                    variant="outline"
+                                    className="border-blue-500/30 bg-blue-500/10 text-blue-400 text-[10px] px-1.5 py-0.5"
+                                  >
+                                    <Users className="h-2.5 w-2.5 mr-1" />
+                                    Team
+                                  </Badge>
+                                )}
                               </div>
                               {workspace.description && (
                                 <p className="text-xs text-zinc-500 line-clamp-2 leading-relaxed ml-10">

@@ -2,7 +2,7 @@ import React from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Loader2, X, RefreshCw, Bug } from "lucide-react";
+import { ArrowLeft, Loader2, X, RefreshCw, Bug, Users, Share2 } from "lucide-react";
 
 interface WorkspaceHeaderProps {
   workspace: {
@@ -12,6 +12,9 @@ interface WorkspaceHeaderProps {
   onStop: () => void;
   onRestart: () => void;
   onShowDiagnostics: () => void;
+  onStartLiveShare?: () => void;
+  onEndLiveShare?: () => void;
+  liveShareActive?: boolean;
   stopping: boolean;
   restarting: boolean;
 }
@@ -21,6 +24,9 @@ export function WorkspaceHeader({
   onStop,
   onRestart,
   onShowDiagnostics,
+  onStartLiveShare,
+  onEndLiveShare,
+  liveShareActive = false,
   stopping,
   restarting,
 }: WorkspaceHeaderProps) {
@@ -70,6 +76,32 @@ export function WorkspaceHeader({
         <div className="flex items-center gap-2">
           {workspace.status === "RUNNING" ? (
             <>
+              {/* Live Share Button */}
+              {liveShareActive ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onEndLiveShare}
+                  className="border-emerald-900/50 bg-emerald-950/30 text-emerald-400 hover:bg-emerald-900/40 hover:text-emerald-300"
+                >
+                  <Users className="h-3.5 w-3.5 mr-2" />
+                  <span className="flex items-center gap-1.5">
+                    Collaborating
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  </span>
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onStartLiveShare}
+                  className="border-purple-900/50 bg-purple-950/30 text-purple-400 hover:bg-purple-900/40 hover:text-purple-300"
+                >
+                  <Share2 className="h-3.5 w-3.5 mr-2" />
+                  Collaborate
+                </Button>
+              )}
+              
               <Button
                 variant="outline"
                 size="sm"

@@ -25,7 +25,11 @@ import {
   ArrowRight,
   ArrowLeft,
   Check,
+  User,
+  Users as UsersIcon,
 } from "lucide-react";
+import { useTeam } from "@/lib/team-context";
+import { toast } from "sonner";
 
 interface Domain {
   id: string;
@@ -97,7 +101,10 @@ export function NewDeploymentDialog({
   onOpenChange,
   onSuccess,
 }: NewDeploymentDialogProps) {
+  const { currentTeam } = useTeam();
   const [loading, setLoading] = useState(false);
+  const [hasTeamGithub, setHasTeamGithub] = useState(false);
+  const [githubSource, setGithubSource] = useState<"personal" | "team">("personal");
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
   const [branches, setBranches] = useState<GitHubBranch[]>([]);
   const [domains, setDomains] = useState<Domain[]>([]);
@@ -128,11 +135,29 @@ export function NewDeploymentDialog({
 
   useEffect(() => {
     if (open) {
+      checkTeamGithub();
       fetchRepos();
       fetchDomains();
       setStep(1); // Reset to first step when opening
     }
-  }, [open]);
+  }, [open, currentTeam]);
+
+  const checkTeamGithub = async () => {
+    if (currentTeam) {
+      try {
+        const res = await fetch(`/api/teams/${currentTeam.id}/integrations`);
+        if (res.ok) {
+          const data = await res.json();
+          setHasTeamGithub(data.githubConnected);
+          if (data.githubConnected) {
+            setGithubSource("team");
+          }
+        }
+      } catch (error) {
+        console.error("Error checking team GitHub:", error);
+      }
+    }
+  };
 
   useEffect(() => {
     const preset = FRAMEWORK_PRESETS[framework];
@@ -142,10 +167,19 @@ export function NewDeploymentDialog({
     setPort(preset.port);
   }, [framework]);
 
-  const fetchRepos = async () => {
+  const fetchRepos = async (source?: "personal" | "team") => {
+    const sourceToUse = source || githubSource;
     setLoadingRepos(true);
+    setRepos([]);
+    
     try {
-      const res = await fetch("/api/user/github/repos");
+      let url = "/api/user/github/repos";
+      
+      if (sourceToUse === "team" && currentTeam && hasTeamGithub) {
+        url = `/api/teams/${currentTeam.id}/github/repos`;
+      }
+      
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         console.log("Fetched repos:", data.repos); // Debug log
@@ -168,9 +202,13 @@ export function NewDeploymentDialog({
     try {
       // Extract owner and repo from full_name (e.g., "owner/repo")
       const [owner, repo] = repoFullName.split("/");
-      const res = await fetch(
-        `/api/user/github/repos?owner=${owner}&repo=${repo}&branches=true`
-      );
+      
+      let url = `/api/user/github/repos?owner=${owner}&repo=${repo}&branches=true`;
+      if (githubSource === "team" && currentTeam && hasTeamGithub) {
+        url = `/api/teams/${currentTeam.id}/github/repos?owner=${owner}&repo=${repo}&branches=true`;
+      }
+      
+      const res = await fetch(url);
 
       if (res.ok) {
         const data = await res.json();
@@ -211,13 +249,13 @@ export function NewDeploymentDialog({
   const handleNext = () => {
     if (step === 1) {
       if (!name || !selectedRepo) {
-        alert("Please fill in project name and select a repository");
+        toast.error("Please fill in project name and select a repository");
         return;
       }
     }
     if (step === 2) {
       if (!startCommand || !port) {
-        alert("Please fill in start command and port");
+        toast.error("Please fill in start command and port");
         return;
       }
     }
@@ -244,6 +282,7 @@ export function NewDeploymentDialog({
           description,
           githubRepo: selectedRepo,
           githubBranch: branch,
+          githubSource: githubSource,
           buildCommand,
           startCommand,
           installCommand,
@@ -252,10 +291,14 @@ export function NewDeploymentDialog({
           domainId: selectedDomainId || null,
           autoRebuild,
           framework: framework !== "custom" ? framework : null,
+          teamId: currentTeam?.id || undefined,
         }),
       });
 
       if (res.ok) {
+        toast.success("Deployment created successfully!", {
+          description: `${name} is being deployed`,
+        });
         onSuccess();
         onOpenChange(false);
         // Reset form
@@ -269,11 +312,11 @@ export function NewDeploymentDialog({
         setStep(1);
       } else {
         const error = await res.json();
-        alert(error.error || "Failed to create deployment");
+        toast.error(error.error || "Failed to create deployment");
       }
     } catch (error) {
       console.error("Error creating deployment:", error);
-      alert("Failed to create deployment");
+      toast.error("Failed to create deployment");
     } finally {
       setLoading(false);
     }
@@ -359,6 +402,56 @@ export function NewDeploymentDialog({
                   className="bg-zinc-900 border-zinc-800"
                 />
               </div>
+
+              {/* GitHub Source Selector */}
+              {currentTeam && hasTeamGithub && (
+                <div className="mb-4">
+                  <label className="text-sm font-medium mb-2 block">
+                    GitHub Source
+                  </label>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant={githubSource === "personal" ? "default" : "outline"}
+                      onClick={() => {
+                        setGithubSource("personal");
+                        setSelectedRepo("");
+                        fetchRepos("personal");
+                      }}
+                      className={`flex-1 ${
+                        githubSource === "personal"
+                          ? "bg-emerald-500 hover:bg-emerald-400 text-zinc-950"
+                          : "border-zinc-700 hover:bg-zinc-800"
+                      }`}
+                    >
+                      <User className="h-4 w-4 mr-2" />
+                      Personal
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={githubSource === "team" ? "default" : "outline"}
+                      onClick={() => {
+                        setGithubSource("team");
+                        setSelectedRepo("");
+                        fetchRepos("team");
+                      }}
+                      className={`flex-1 ${
+                        githubSource === "team"
+                          ? "bg-blue-500 hover:bg-blue-400 text-white"
+                          : "border-zinc-700 hover:bg-zinc-800"
+                      }`}
+                    >
+                      <UsersIcon className="h-4 w-4 mr-2" />
+                      Team ({currentTeam.name})
+                    </Button>
+                  </div>
+                  <p className="text-xs text-zinc-500 mt-2">
+                    {githubSource === "personal"
+                      ? "Using your personal GitHub repositories"
+                      : `Using ${currentTeam.name}'s GitHub repositories`}
+                  </p>
+                </div>
+              )}
 
               {/* GitHub Repository */}
               <div>

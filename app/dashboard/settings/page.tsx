@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -178,14 +179,14 @@ export default function SettingsPage() {
       if (res.ok) {
         setGithubConnected(false);
         setGithubUser(null);
-        alert("GitHub account disconnected successfully!");
+        toast.success("GitHub account disconnected successfully!");
       } else {
         const error = await res.json();
-        alert(error.error || "Failed to disconnect GitHub");
+        toast.error(error.error || "Failed to disconnect GitHub");
       }
     } catch (error) {
       console.error("Error disconnecting GitHub:", error);
-      alert("Failed to disconnect GitHub");
+      toast.error("Failed to disconnect GitHub");
     } finally {
       setDisconnectingGithub(false);
     }
@@ -221,14 +222,14 @@ export default function SettingsPage() {
         const data = await res.json();
         setHasExistingApiKey(data.hasApiKey || false);
         setApiKey(""); // Clear input after save
-        alert("Settings saved successfully!");
+        toast.success("Settings saved successfully!");
       } else {
         const error = await res.json();
-        alert(error.error || "Failed to save settings");
+        toast.error(error.error || "Failed to save settings");
       }
     } catch (error) {
       console.error("Error saving settings:", error);
-      alert("Failed to save settings");
+      toast.error("Failed to save settings");
     } finally {
       setSaving(false);
     }
@@ -242,7 +243,7 @@ export default function SettingsPage() {
       }
     } else {
       if (favoriteModels.length >= 10) {
-        alert("Maximum 10 favorite models allowed");
+        toast.error("Maximum 10 favorite models allowed");
         return;
       }
       setFavoriteModels([...favoriteModels, modelId]);

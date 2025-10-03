@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Sidebar } from "@/components/sidebar";
+import { useTeam } from "@/lib/team-context";
 import {
   Github,
   Loader2,
@@ -18,7 +19,10 @@ import {
   Settings as SettingsIcon,
   ExternalLink,
   AlertCircle,
+  User,
+  Users as UsersIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 const templates = [
   { id: "node", name: "Node.js", desc: "Node.js 20 + npm/bun" },
@@ -56,6 +60,7 @@ const steps = [
 
 export default function NewWorkspacePage() {
   const router = useRouter();
+  const { currentTeam } = useTeam();
   const [currentStep, setCurrentStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [githubConnected, setGithubConnected] = useState(false);
@@ -70,6 +75,8 @@ export default function NewWorkspacePage() {
   const [repoSearch, setRepoSearch] = useState("");
   const [userPresets, setUserPresets] = useState<any[]>([]);
   const [loadingPresets, setLoadingPresets] = useState(true);
+  const [hasTeamGithub, setHasTeamGithub] = useState(false);
+  const [githubSource, setGithubSource] = useState<"personal" | "team">("personal");
   const [formData, setFormData] = useState({
     name: "",
     description: "",
@@ -83,7 +90,7 @@ export default function NewWorkspacePage() {
   useEffect(() => {
     fetchGithubStatus();
     fetchUserPresets();
-  }, []);
+  }, [currentTeam]);
 
   const fetchUserPresets = async () => {
     try {
@@ -102,6 +109,19 @@ export default function NewWorkspacePage() {
   const fetchGithubStatus = async () => {
     setLoadingGithub(true);
     try {
+      // Check team GitHub
+      if (currentTeam) {
+        const teamRes = await fetch(`/api/teams/${currentTeam.id}/integrations`);
+        if (teamRes.ok) {
+          const teamData = await teamRes.json();
+          setHasTeamGithub(teamData.githubConnected);
+          if (teamData.githubConnected) {
+            setGithubSource("team");
+          }
+        }
+      }
+
+      // Check personal GitHub
       const res = await fetch("/api/user/github");
       if (res.ok) {
         const data = await res.json();
@@ -111,6 +131,9 @@ export default function NewWorkspacePage() {
             username: data.username,
             avatarUrl: data.avatarUrl,
           });
+          if (!hasTeamGithub) {
+            setGithubSource("personal");
+          }
         }
       }
     } catch (error) {
@@ -120,13 +143,20 @@ export default function NewWorkspacePage() {
     }
   };
 
-  const fetchRepos = async () => {
-    if (!githubConnected) return;
+  const fetchRepos = async (source?: "personal" | "team") => {
+    const sourceToUse = source || githubSource;
     setLoadingRepos(true);
+    setRepos([]);
+    
     try {
-      const res = await fetch(
-        "/api/user/github/repos?per_page=50&sort=updated"
-      );
+      let url = "/api/user/github/repos?per_page=50&sort=updated";
+      
+      // Use team repos if team source selected
+      if (sourceToUse === "team" && currentTeam && hasTeamGithub) {
+        url = `/api/teams/${currentTeam.id}/github/repos`;
+      }
+      
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         setRepos(data.repos || []);
@@ -139,10 +169,10 @@ export default function NewWorkspacePage() {
   };
 
   useEffect(() => {
-    if (githubConnected && currentStep === 3) {
+    if ((githubConnected || hasTeamGithub) && currentStep === 3) {
       fetchRepos();
     }
-  }, [githubConnected, currentStep]);
+  }, [githubConnected, hasTeamGithub, currentStep, githubSource]);
 
   const filteredRepos = useMemo(() => {
     const query = repoSearch.trim().toLowerCase();
@@ -200,6 +230,8 @@ export default function NewWorkspacePage() {
         preset: formData.customPresetId
           ? formData.customPresetId
           : formData.preset,
+        teamId: currentTeam?.id || undefined,
+        githubSource: githubSource,
       };
 
       const res = await fetch("/api/workspaces", {
@@ -210,14 +242,17 @@ export default function NewWorkspacePage() {
 
       if (res.ok) {
         const workspace = await res.json();
+        toast.success("Workspace created successfully!", {
+          description: `${formData.name} is ready to use`,
+        });
         router.push(`/workspace/${workspace.id}`);
       } else {
         const error = await res.json();
-        alert(error.error || "Failed to create workspace");
+        toast.error(error.error || "Failed to create workspace");
       }
     } catch (error) {
       console.error("Error creating workspace:", error);
-      alert("Failed to create workspace");
+      toast.error("Failed to create workspace");
     } finally {
       setLoading(false);
     }
@@ -512,8 +547,55 @@ export default function NewWorkspacePage() {
                 </p>
               </div>
 
-              {githubConnected && (
+              {(githubConnected || hasTeamGithub) && (
                 <div>
+                  {/* GitHub Source Selector */}
+                  {currentTeam && hasTeamGithub && githubConnected && (
+                    <div className="mb-4">
+                      <label className="text-sm font-medium text-zinc-400 mb-2 block">
+                        GitHub Source
+                      </label>
+                      <div className="flex gap-2">
+                        <Button
+                          type="button"
+                          variant={githubSource === "personal" ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => {
+                            setGithubSource("personal");
+                            setFormData({ ...formData, githubRepo: "" });
+                            fetchRepos("personal");
+                          }}
+                          className={`flex-1 ${
+                            githubSource === "personal"
+                              ? "bg-emerald-500 hover:bg-emerald-400 text-zinc-950"
+                              : "border-zinc-700 hover:bg-zinc-800"
+                          }`}
+                        >
+                          <User className="h-3.5 w-3.5 mr-2" />
+                          Personal
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={githubSource === "team" ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => {
+                            setGithubSource("team");
+                            setFormData({ ...formData, githubRepo: "" });
+                            fetchRepos("team");
+                          }}
+                          className={`flex-1 ${
+                            githubSource === "team"
+                              ? "bg-blue-500 hover:bg-blue-400 text-white"
+                              : "border-zinc-700 hover:bg-zinc-800"
+                          }`}
+                        >
+                          <UsersIcon className="h-3.5 w-3.5 mr-2" />
+                          Team
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
                   <Button
                     type="button"
                     variant="outline"
@@ -526,7 +608,7 @@ export default function NewWorkspacePage() {
                     }}
                     className="border-zinc-700 hover:bg-zinc-800 text-zinc-300"
                   >
-                    {showRepoSelector ? "Hide" : "Browse"} My Repositories
+                    {showRepoSelector ? "Hide" : "Browse"} Repositories
                   </Button>
 
                   {showRepoSelector && (

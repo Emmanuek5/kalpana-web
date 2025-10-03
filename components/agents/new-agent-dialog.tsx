@@ -26,7 +26,14 @@ import {
   ArrowLeft,
   Check,
   Bot,
+  AlertCircle,
+  Key,
+  User,
+  Users as UsersIcon,
 } from "lucide-react";
+import { useTeam } from "@/lib/team-context";
+import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
 
 interface GitHubRepo {
   id: number;
@@ -54,6 +61,7 @@ export function NewAgentDialog({
   onOpenChange,
   onSuccess,
 }: NewAgentDialogProps) {
+  const { currentTeam } = useTeam();
   const [loading, setLoading] = useState(false);
   const [repos, setRepos] = useState<GitHubRepo[]>([]);
   const [branches, setBranches] = useState<GitHubBranch[]>([]);
@@ -62,11 +70,16 @@ export function NewAgentDialog({
   const [loadingBranches, setLoadingBranches] = useState(false);
   const [loadingModels, setLoadingModels] = useState(false);
   const [step, setStep] = useState(1);
+  const [hasKeys, setHasKeys] = useState(false);
+  const [checkingKeys, setCheckingKeys] = useState(true);
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [hasTeamGithub, setHasTeamGithub] = useState(false);
 
   // Form state
   const [name, setName] = useState("");
   const [task, setTask] = useState("");
   const [model, setModel] = useState("select-model");
+  const [githubSource, setGithubSource] = useState<"personal" | "team">("personal");
   const [selectedRepo, setSelectedRepo] = useState("");
   const [sourceBranch, setSourceBranch] = useState("main");
   const [targetBranch, setTargetBranch] = useState("");
@@ -74,11 +87,72 @@ export function NewAgentDialog({
 
   useEffect(() => {
     if (open) {
+      checkRequiredKeys();
       fetchRepos();
       fetchModels();
       setStep(1); // Reset to first step when opening
     }
-  }, [open]);
+  }, [open, currentTeam]);
+
+  const checkRequiredKeys = async () => {
+    setCheckingKeys(true);
+    setKeyError(null);
+    
+    try {
+      let teamHasGithub = false;
+      let teamHasOpenRouter = false;
+
+      // Check if team has keys
+      if (currentTeam) {
+        const res = await fetch(`/api/teams/${currentTeam.id}/integrations`);
+        if (res.ok) {
+          const data = await res.json();
+          teamHasGithub = data.githubConnected;
+          teamHasOpenRouter = data.openrouterConfigured;
+          setHasTeamGithub(teamHasGithub);
+          
+          if (teamHasGithub && teamHasOpenRouter) {
+            setHasKeys(true);
+            setGithubSource("team"); // Default to team if available
+            setCheckingKeys(false);
+            return;
+          }
+        }
+      }
+
+      // Check user keys
+      const [githubRes, userRes] = await Promise.all([
+        fetch("/api/github/status"),
+        fetch("/api/user/settings"),
+      ]);
+
+      const userHasGithub = githubRes.ok && (await githubRes.json()).connected;
+      const userSettings = userRes.ok ? await userRes.json() : null;
+      const userHasOpenRouter = !!userSettings?.openrouterApiKey;
+
+      // Determine if we have enough keys (either team or user)
+      const hasGithub = teamHasGithub || userHasGithub;
+      const hasOpenRouter = teamHasOpenRouter || userHasOpenRouter;
+
+      if (hasGithub && hasOpenRouter) {
+        setHasKeys(true);
+        // Set default source based on what's available
+        setGithubSource(userHasGithub ? "personal" : "team");
+      } else {
+        const missing = [];
+        if (!hasGithub) missing.push("GitHub");
+        if (!hasOpenRouter) missing.push("OpenRouter API key");
+        setKeyError(`Missing: ${missing.join(" and ")}`);
+        setHasKeys(false);
+      }
+    } catch (error) {
+      console.error("Error checking keys:", error);
+      setKeyError("Failed to verify credentials");
+      setHasKeys(false);
+    } finally {
+      setCheckingKeys(false);
+    }
+  };
 
   const fetchModels = async () => {
     setLoadingModels(true);
@@ -143,10 +217,21 @@ export function NewAgentDialog({
     return `agent/${base || "update"}`;
   };
 
-  const fetchRepos = async () => {
+  const fetchRepos = async (source?: "personal" | "team") => {
+    const sourceToUse = source || githubSource;
     setLoadingRepos(true);
+    setRepos([]);
+    setSelectedRepo("");
+    
     try {
-      const res = await fetch("/api/user/github/repos");
+      let url = "/api/user/github/repos";
+      
+      // Use team repos if team source selected and team has GitHub
+      if (sourceToUse === "team" && currentTeam && hasTeamGithub) {
+        url = `/api/teams/${currentTeam.id}/github/repos`;
+      }
+      
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         setRepos(data.repos || []);
@@ -167,9 +252,14 @@ export function NewAgentDialog({
     setBranches([]);
     try {
       const [owner, repo] = repoFullName.split("/");
-      const res = await fetch(
-        `/api/user/github/repos?owner=${owner}&repo=${repo}&branches=true`
-      );
+      
+      // Use team endpoint if team source selected
+      let url = `/api/user/github/repos?owner=${owner}&repo=${repo}&branches=true`;
+      if (githubSource === "team" && currentTeam && hasTeamGithub) {
+        url = `/api/teams/${currentTeam.id}/github/repos?owner=${owner}&repo=${repo}&branches=true`;
+      }
+      
+      const res = await fetch(url);
 
       if (res.ok) {
         const data = await res.json();
@@ -198,13 +288,13 @@ export function NewAgentDialog({
   const handleNext = () => {
     if (step === 1) {
       if (!name || !task) {
-        alert("Please fill in agent name and task description");
+        toast.error("Please fill in agent name and task description");
         return;
       }
     }
     if (step === 2) {
       if (!selectedRepo) {
-        alert("Please select a GitHub repository");
+        toast.error("Please select a GitHub repository");
         return;
       }
     }
@@ -217,12 +307,12 @@ export function NewAgentDialog({
 
   const handleCreate = async () => {
     if (!name || !task || !selectedRepo || !targetBranch) {
-      alert("Please fill in all required fields");
+      toast.error("Please fill in all required fields");
       return;
     }
 
     if (model === "select-model") {
-      alert("Please select a model");
+      toast.error("Please select a model");
       return;
     }
 
@@ -238,10 +328,15 @@ export function NewAgentDialog({
           githubRepo: selectedRepo,
           sourceBranch,
           targetBranch,
+          teamId: currentTeam?.id || undefined,
+          githubSource: githubSource,
         }),
       });
 
       if (res.ok) {
+        toast.success("Agent created successfully!", {
+          description: `${name} is ready to start working`,
+        });
         onSuccess();
         onOpenChange(false);
         // Reset form
@@ -255,11 +350,11 @@ export function NewAgentDialog({
         setStep(1);
       } else {
         const error = await res.json();
-        alert(error.error || "Failed to create agent");
+        toast.error(error.error || "Failed to create agent");
       }
     } catch (error) {
       console.error("Error creating agent:", error);
-      alert("Failed to create agent");
+      toast.error("Failed to create agent");
     } finally {
       setLoading(false);
     }
@@ -316,11 +411,56 @@ export function NewAgentDialog({
         </div>
 
         <div className="space-y-4 py-4 min-h-[300px]">
-          {/* Step 1: Agent Configuration */}
-          {step === 1 && (
+          {/* Key Validation Warning */}
+          {checkingKeys ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-emerald-500" />
+            </div>
+          ) : !hasKeys ? (
+            <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <h4 className="font-semibold text-red-400 mb-1">
+                    Missing Required Credentials
+                  </h4>
+                  <p className="text-sm text-zinc-300 mb-3">
+                    {keyError}
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    {currentTeam ? (
+                      <Button
+                        onClick={() => window.open(`/dashboard/teams/${currentTeam.id}`, "_blank")}
+                        size="sm"
+                        className="bg-blue-500 hover:bg-blue-400 text-white"
+                      >
+                        <Key className="h-3.5 w-3.5 mr-2" />
+                        Configure Team Settings
+                      </Button>
+                    ) : (
+                      <Button
+                        onClick={() => window.open("/dashboard/settings", "_blank")}
+                        size="sm"
+                        className="bg-emerald-500 hover:bg-emerald-400 text-zinc-950"
+                      >
+                        <Key className="h-3.5 w-3.5 mr-2" />
+                        Configure Personal Settings
+                      </Button>
+                    )}
+                    <p className="text-xs text-zinc-500">
+                      After configuring, close and reopen this dialog
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
             <>
-              {/* Name */}
-              <div>
+              {/* Step 1: Agent Configuration */}
+              {step === 1 && (
+                <>
+                  {/* Name */}
+                  <div>
                 <label className="text-sm font-medium mb-1.5 block">
                   Agent Name *
                 </label>
@@ -389,6 +529,54 @@ export function NewAgentDialog({
           {/* Step 2: Repository Selection */}
           {step === 2 && (
             <>
+              {/* GitHub Source Selector (only show if both personal and team GitHub available) */}
+              {currentTeam && hasTeamGithub && (
+                <div className="mb-4">
+                  <label className="text-sm font-medium mb-2 block">
+                    GitHub Source
+                  </label>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant={githubSource === "personal" ? "default" : "outline"}
+                      onClick={() => {
+                        setGithubSource("personal");
+                        fetchRepos("personal");
+                      }}
+                      className={`flex-1 ${
+                        githubSource === "personal"
+                          ? "bg-emerald-500 hover:bg-emerald-400 text-zinc-950"
+                          : "border-zinc-700 hover:bg-zinc-800"
+                      }`}
+                    >
+                      <User className="h-4 w-4 mr-2" />
+                      Personal
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={githubSource === "team" ? "default" : "outline"}
+                      onClick={() => {
+                        setGithubSource("team");
+                        fetchRepos("team");
+                      }}
+                      className={`flex-1 ${
+                        githubSource === "team"
+                          ? "bg-blue-500 hover:bg-blue-400 text-white"
+                          : "border-zinc-700 hover:bg-zinc-800"
+                      }`}
+                    >
+                      <UsersIcon className="h-4 w-4 mr-2" />
+                      Team ({currentTeam.name})
+                    </Button>
+                  </div>
+                  <p className="text-xs text-zinc-500 mt-2">
+                    {githubSource === "personal"
+                      ? "Using your personal GitHub repositories"
+                      : `Using ${currentTeam.name}'s GitHub repositories`}
+                  </p>
+                </div>
+              )}
+
               {/* GitHub Repository */}
               <div>
                 <label className="text-sm font-medium mb-1.5 flex items-center gap-2">
@@ -551,55 +739,61 @@ export function NewAgentDialog({
               </div>
             </>
           )}
+            </>
+          )}
         </div>
 
-        <DialogFooter className="flex items-center justify-between">
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              onClick={() => onOpenChange(false)}
-              className="border-zinc-800"
-            >
-              Cancel
-            </Button>
-            {step > 1 && (
+        {!checkingKeys && (
+          <DialogFooter className="flex items-center justify-between">
+            <div className="flex gap-2">
               <Button
                 variant="outline"
-                onClick={handleBack}
+                onClick={() => onOpenChange(false)}
                 className="border-zinc-800"
               >
-                <ArrowLeft className="h-4 w-4 mr-2" />
-                Back
+                Cancel
               </Button>
-            )}
-          </div>
-          <div className="flex gap-2">
-            {step < 3 ? (
-              <Button
-                onClick={handleNext}
-                className="bg-emerald-600 hover:bg-emerald-500"
-              >
-                Next
-                <ArrowRight className="h-4 w-4 ml-2" />
-              </Button>
-            ) : (
-              <Button
-                onClick={handleCreate}
-                disabled={
-                  !name || !task || !selectedRepo || !targetBranch || loading
-                }
-                className="bg-emerald-600 hover:bg-emerald-500"
-              >
-                {loading ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              {hasKeys && step > 1 && (
+                <Button
+                  variant="outline"
+                  onClick={handleBack}
+                  className="border-zinc-800"
+                >
+                  <ArrowLeft className="h-4 w-4 mr-2" />
+                  Back
+                </Button>
+              )}
+            </div>
+            {hasKeys && (
+              <div className="flex gap-2">
+                {step < 3 ? (
+                  <Button
+                    onClick={handleNext}
+                    className="bg-emerald-600 hover:bg-emerald-500"
+                  >
+                    Next
+                    <ArrowRight className="h-4 w-4 ml-2" />
+                  </Button>
                 ) : (
-                  <Check className="h-4 w-4 mr-2" />
+                  <Button
+                    onClick={handleCreate}
+                    disabled={
+                      !name || !task || !selectedRepo || !targetBranch || loading
+                    }
+                    className="bg-emerald-600 hover:bg-emerald-500"
+                  >
+                    {loading ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <Check className="h-4 w-4 mr-2" />
+                    )}
+                    Create Agent
+                  </Button>
                 )}
-                Create Agent
-              </Button>
+              </div>
             )}
-          </div>
-        </DialogFooter>
+          </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );

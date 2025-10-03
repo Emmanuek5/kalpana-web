@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Sidebar } from "@/components/sidebar";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
   DialogContent,
@@ -28,7 +29,9 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { NotificationBell } from "@/components/workspace/notification-bell";
+import { useTeam } from "@/lib/team-context";
 
 interface Agent {
   id: string;
@@ -52,15 +55,20 @@ export default function AgentsPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const { currentTeam} = useTeam();
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     fetchAgents();
-  }, []);
+  }, [currentTeam]);
 
   const fetchAgents = async () => {
     try {
-      const res = await fetch("/api/agents");
+      const url = currentTeam 
+        ? `/api/agents?teamId=${currentTeam.id}`
+        : "/api/agents";
+      
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         setAgents(data);
@@ -84,14 +92,17 @@ export default function AgentsPage() {
 
       if (res.ok) {
         await fetchAgents();
+        toast.success("Agent started!", {
+          description: `${agent.name} is now running`,
+        });
         router.push(`/dashboard/agents/${agent.id}`);
       } else {
         const error = await res.json();
-        alert(error.error || "Failed to start agent");
+        toast.error(error.error || "Failed to start agent");
       }
     } catch (error) {
       console.error("Error starting agent:", error);
-      alert("Failed to start agent");
+      toast.error("Failed to start agent");
     }
   };
 
@@ -112,12 +123,13 @@ export default function AgentsPage() {
       if (res.ok) {
         await fetchAgents();
         setDeleteModalOpen(false);
+        toast.success("Agent deleted");
       } else {
-        alert("Failed to delete agent");
+        toast.error("Failed to delete agent");
       }
     } catch (error) {
       console.error("Error deleting agent:", error);
-      alert("Failed to delete agent");
+      toast.error("Failed to delete agent");
     } finally {
       setDeleting(false);
     }
@@ -157,7 +169,7 @@ export default function AgentsPage() {
       <Sidebar />
 
       <div className="flex-1 flex flex-col overflow-hidden relative z-10">
-        <div className="border-b border-zinc-800/50 flex items-center justify-between px-6 py-4 bg-zinc-950/50 backdrop-blur-sm">
+        <div className="border-b border-zinc-800/50 flex items-center justify-between px-6 py-4 bg-zinc-950/50 backdrop-blur-sm relative z-50">
           <div className="flex items-center gap-3">
             <Bot className="h-5 w-5 text-emerald-400" />
             <h1 className="text-lg font-medium text-zinc-100">Agents</h1>
@@ -183,11 +195,7 @@ export default function AgentsPage() {
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-7xl mx-auto p-8">
-            {loading ? (
-              <div className="flex items-center justify-center py-32">
-                <Loader2 className="h-12 w-12 text-emerald-400 animate-spin" />
-              </div>
-            ) : agents.length === 0 ? (
+            {agents.length === 0 && !loading ? (
               <Card className="p-20 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 text-center backdrop-blur-xl relative overflow-hidden group">
                 <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 via-transparent to-cyan-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
                 <div className="max-w-md mx-auto relative z-10">
@@ -214,6 +222,35 @@ export default function AgentsPage() {
                   </Button>
                 </div>
               </Card>
+            ) : loading ? (
+              <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {[1, 2, 3].map((i) => (
+                  <Card key={i} className="p-6 bg-zinc-900/50 border-zinc-800/60">
+                    <div className="space-y-4">
+                      <div className="flex items-start justify-between mb-4">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Skeleton className="h-4 w-4 bg-zinc-800" />
+                            <Skeleton className="h-5 w-32 bg-zinc-800" />
+                          </div>
+                          <Skeleton className="h-4 w-full bg-zinc-800" />
+                          <Skeleton className="h-4 w-3/4 bg-zinc-800 mt-1" />
+                        </div>
+                        <Skeleton className="h-6 w-20 bg-zinc-800" />
+                      </div>
+                      <div className="space-y-3">
+                        <Skeleton className="h-10 w-full bg-zinc-800" />
+                        <Skeleton className="h-4 w-full bg-zinc-800" />
+                        <Skeleton className="h-4 w-24 bg-zinc-800" />
+                      </div>
+                      <div className="flex gap-2">
+                        <Skeleton className="h-9 flex-1 bg-zinc-800" />
+                        <Skeleton className="h-9 w-9 bg-zinc-800" />
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
             ) : (
               <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
                 {agents.map((agent) => (

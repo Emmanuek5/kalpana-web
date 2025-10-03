@@ -2,7 +2,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 
-// GET /api/presets - Get all presets for current user
+// GET /api/presets - Get all presets for current user or team
 export async function GET(req: NextRequest) {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -11,14 +11,37 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const presets = await prisma.preset.findMany({
-      where: {
-        userId: session.user.id,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+    const teamId = req.nextUrl.searchParams.get("teamId");
+
+    let presets;
+
+    if (teamId) {
+      // Check if user is a team member
+      const member = await prisma.teamMember.findFirst({
+        where: { teamId, userId: session.user.id },
+      });
+
+      if (!member) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+
+      // Fetch team presets
+      presets = await prisma.preset.findMany({
+        where: { teamId },
+        orderBy: { updatedAt: "desc" },
+      });
+    } else {
+      // Fetch personal presets
+      presets = await prisma.preset.findMany({
+        where: {
+          userId: session.user.id,
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+      
+      // Filter out team presets
+      presets = presets.filter((p: any) => !p.teamId);
+    }
 
     return NextResponse.json(presets);
   } catch (error) {

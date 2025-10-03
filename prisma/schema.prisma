@@ -33,6 +33,11 @@ model User {
   deployments         Deployment[]
   notifications       Notification[]
   
+  // Team relations
+  ownedTeams          Team[]              @relation("TeamOwner")
+  teamMemberships     TeamMember[]
+  sentInvitations     TeamInvitation[]    @relation("InvitedBy")
+  
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
 }
@@ -95,6 +100,7 @@ model Workspace {
   // Configuration
   githubRepo      String?
   githubBranch    String?         @default("main")
+  githubSource    String?         @default("personal") // "personal" or "team" - which GitHub account to use
   nixConfig       String?
   template        String?
   preset          String?         @default("default")
@@ -102,6 +108,10 @@ model Workspace {
   // User relation
   userId          String          @db.ObjectId
   user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Team relation (optional)
+  teamId          String?         @db.ObjectId
+  team            Team?           @relation(fields: [teamId], references: [id], onDelete: Cascade)
   
   // Relations
   chats           Chat[]
@@ -114,6 +124,7 @@ model Workspace {
   updatedAt       DateTime        @updatedAt
   
   @@index([userId])
+  @@index([teamId])
   @@index([status])
   @@index([lastAccessedAt])
 }
@@ -163,9 +174,14 @@ model Preset {
   userId          String   @db.ObjectId
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
+  // Team relation (optional)
+  teamId          String?  @db.ObjectId
+  team            Team?    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
   updatedAt       DateTime @updatedAt
   
   @@index([userId])
+  @@index([teamId])
 }
 
 model Message {
@@ -298,6 +314,7 @@ model Deployment {
   // GitHub repository (for standalone deployments)
   githubRepo      String?           // e.g., "owner/repo"
   githubBranch    String?           @default("main")
+  githubSource    String?           @default("personal") // "personal" or "team" - which GitHub account to use
   rootDirectory   String?           // Root directory in repo (for monorepos)
   
   // Container metadata
@@ -328,6 +345,10 @@ model Deployment {
   userId          String            @db.ObjectId
   user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   
+  // Team relation (optional)
+  teamId          String?           @db.ObjectId
+  team            Team?             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
   // Workspace relation (OPTIONAL - for workspace-based deployments)
   workspaceId     String?           @db.ObjectId
   workspace       Workspace?        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -341,6 +362,7 @@ model Deployment {
   updatedAt       DateTime          @updatedAt
   
   @@index([userId])
+  @@index([teamId])
   @@index([workspaceId])
   @@index([status])
   @@index([subdomain])
@@ -374,6 +396,7 @@ model Agent {
   
   // AI Configuration
   model           String        @default("anthropic/claude-3.5-sonnet") // OpenRouter model to use
+  githubSource    String?       @default("personal") // "personal" or "team" - which GitHub account to use
   
   // Execution data
   toolCalls       String?       // JSON array of tool calls/messages
@@ -390,6 +413,10 @@ model Agent {
   userId          String        @db.ObjectId
   user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   
+  // Team relation (optional)
+  teamId          String?       @db.ObjectId
+  team            Team?         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
   // Metadata
   startedAt       DateTime?
   completedAt     DateTime?
@@ -399,6 +426,7 @@ model Agent {
   updatedAt       DateTime      @updatedAt
   
   @@index([userId])
+  @@index([teamId])
   @@index([status])
   @@index([createdAt])
 }
@@ -435,4 +463,84 @@ model Notification {
   @@index([userId])
   @@index([read])
   @@index([createdAt])
+}
+
+// ============================================
+// TEAM MODELS
+// ============================================
+
+model Team {
+  id          String           @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  slug        String           @unique
+  description String?
+  image       String?
+  
+  // Owner
+  ownerId     String           @db.ObjectId
+  owner       User             @relation("TeamOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  // Team integrations
+  githubAccessToken String?      // Encrypted GitHub access token for team
+  githubUsername    String?      // GitHub username/org for team
+  openrouterApiKey  String?      // Encrypted OpenRouter API key for team
+  
+  // Relations
+  members     TeamMember[]
+  invitations TeamInvitation[]
+  workspaces  Workspace[]
+  deployments Deployment[]
+  agents      Agent[]
+  presets     Preset[]
+  
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  
+  @@index([ownerId])
+}
+
+model TeamMember {
+  id        String     @id @default(auto()) @map("_id") @db.ObjectId
+  teamId    String     @db.ObjectId
+  team      Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  userId    String     @db.ObjectId
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  role      TeamRole   @default(MEMBER)
+  
+  joinedAt  DateTime   @default(now())
+  
+  @@unique([teamId, userId])
+  @@index([teamId])
+  @@index([userId])
+}
+
+enum TeamRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+model TeamInvitation {
+  id         String     @id @default(auto()) @map("_id") @db.ObjectId
+  teamId     String     @db.ObjectId
+  team       Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  email      String
+  role       TeamRole   @default(MEMBER)
+  token      String     @unique
+  
+  invitedBy  String     @db.ObjectId
+  inviter    User       @relation("InvitedBy", fields: [invitedBy], references: [id], onDelete: Cascade)
+  
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  
+  createdAt  DateTime   @default(now())
+  
+  @@index([teamId])
+  @@index([email])
+  @@index([expiresAt])
 }

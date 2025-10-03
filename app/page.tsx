@@ -1,4 +1,5 @@
-import React from "react";
+"use client"
+import React, { useEffect, useState } from "react";
 import { Github, Terminal, ArrowRight } from "lucide-react";
 import { BentoGridFeatures } from "@/components/landing/bento-features";
 import {
@@ -9,6 +10,19 @@ import { PricingSection } from "@/components/landing/pricing";
 import { FAQSection } from "@/components/landing/faq";
 
 export default function LandingPage() {
+  const [session, setSession] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/auth/get-session")
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => {
+        setSession(data);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans">
       {/* Subtle grid background */}
@@ -26,18 +40,31 @@ export default function LandingPage() {
             </span>
           </div>
           <div className="flex items-center gap-3">
-            <a
-              href="/dashboard"
-              className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-100 transition-colors"
-            >
-              Dashboard
-            </a>
-            <a
-              href="/login"
-              className="px-5 py-2 text-sm bg-emerald-500 text-zinc-950 hover:bg-emerald-400 transition-all rounded-lg font-medium"
-            >
-              Get Started
-            </a>
+            {!loading && (
+              session?.user ? (
+                <a
+                  href="/dashboard"
+                  className="px-5 py-2 text-sm bg-emerald-500 text-zinc-950 hover:bg-emerald-400 transition-all rounded-lg font-medium"
+                >
+                  Go to Dashboard
+                </a>
+              ) : (
+                <>
+                  <a
+                    href="/login"
+                    className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-100 transition-colors"
+                  >
+                    Sign In
+                  </a>
+                  <a
+                    href="/login"
+                    className="px-5 py-2 text-sm bg-emerald-500 text-zinc-950 hover:bg-emerald-400 transition-all rounded-lg font-medium"
+                  >
+                    Get Started
+                  </a>
+                </>
+              )
+            )}
           </div>
         </div>
       </nav>
@@ -125,37 +152,122 @@ export default function LandingPage() {
         </div>
       </div>
 
-      {/* Footer */}
-      <footer className="relative border-t border-zinc-800/50 py-12 mt-20">
+    {/* Footer */}
+    <footer className="relative border-t border-zinc-800/50 py-16 mt-20 bg-zinc-950/50">
         <div className="container mx-auto px-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="h-7 w-7 rounded-lg bg-gradient-to-br from-emerald-500/10 to-emerald-500/5 flex items-center justify-center border border-emerald-500/20">
-                <Terminal className="h-3.5 w-3.5 text-emerald-400" />
+          <div className="grid md:grid-cols-4 gap-12 mb-12">
+            {/* Brand */}
+            <div className="md:col-span-1">
+              <div className="flex items-center gap-2.5 mb-4">
+                <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-emerald-500/10 to-emerald-500/5 flex items-center justify-center border border-emerald-500/20">
+                  <Terminal className="h-4 w-4 text-emerald-400" />
+                </div>
+                <span className="text-xl font-normal text-zinc-100">Kalpana</span>
               </div>
-              <span className="font-normal text-zinc-400">Kalpana</span>
-            </div>
-            <div className="flex items-center gap-6">
-              <a
-                href="/dashboard"
-                className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors"
-              >
-                Dashboard
-              </a>
-              <a
-                href="/login"
-                className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors"
-              >
-                Sign In
-              </a>
-              <p className="text-sm text-zinc-600">
-                Built with Next.js, AI SDK, and Docker
+              <p className="text-sm text-zinc-500 leading-relaxed">
+                AI-powered cloud development platform for modern developers.
               </p>
             </div>
+
+            {/* Product */}
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-300 mb-4">Product</h3>
+              <ul className="space-y-3">
+                <li>
+                  <a href="#features" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    Features
+                  </a>
+                </li>
+                <li>
+                  <a href="/dashboard" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    Dashboard
+                  </a>
+                </li>
+                <li>
+                  <a href="#pricing" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    Pricing
+                  </a>
+                </li>
+                <li>
+                  <a href="#faq" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    FAQ
+                  </a>
+                </li>
+              </ul>
+            </div>
+
+            {/* Resources */}
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-300 mb-4">Resources</h3>
+              <ul className="space-y-3">
+                <li>
+                  <a href="#" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    Documentation
+                  </a>
+                </li>
+                <li>
+                  <a href="#" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    API Reference
+                  </a>
+                </li>
+                <li>
+                  <a href="#" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    Guides
+                  </a>
+                </li>
+                <li>
+                  <a href="#" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    Support
+                  </a>
+                </li>
+              </ul>
+            </div>
+
+            {/* Company */}
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-300 mb-4">Company</h3>
+              <ul className="space-y-3">
+                <li>
+                  <a href="#" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    About
+                  </a>
+                </li>
+                <li>
+                  <a href="#" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    Blog
+                  </a>
+                </li>
+                <li>
+                  <a href="/login" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors">
+                    Sign In
+                  </a>
+                </li>
+                <li>
+                  <a href="https://github.com" className="text-sm text-zinc-500 hover:text-emerald-400 transition-colors flex items-center gap-2">
+                    <Github className="h-3.5 w-3.5" />
+                    GitHub
+                  </a>
+                </li>
+              </ul>
+            </div>
           </div>
-          <div className="mt-8 text-center text-xs text-zinc-700">
-            © {new Date().getFullYear()} Kalpana. Your AI-powered cloud
-            development platform.
+
+          {/* Bottom bar */}
+          <div className="pt-8 border-t border-zinc-800/50 flex flex-col md:flex-row items-center justify-between gap-4">
+            <p className="text-sm text-zinc-600">
+              &copy; {new Date().getFullYear()} Kalpana. All rights reserved.
+            </p>
+            <div className="flex items-center gap-6">
+              <a href="#" className="text-sm text-zinc-600 hover:text-emerald-400 transition-colors">
+                Privacy Policy
+              </a>
+              <a href="#" className="text-sm text-zinc-600 hover:text-emerald-400 transition-colors">
+                Terms of Service
+              </a>
+              <p className="text-sm text-zinc-700">
+                Built with Next.js & Docker
+              </p>
+            </div>
           </div>
         </div>
       </footer>

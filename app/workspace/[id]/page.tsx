@@ -23,6 +23,8 @@ import {
   ChevronUp,
   ArrowLeft,
   Code2,
+  Rocket,
+  Users,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -34,6 +36,8 @@ import { WorkspaceEditor } from "@/components/workspace/workspace-editor";
 import { AIAgentPanel } from "@/components/workspace/ai-agent-panel";
 import { DiagnosticsDialog } from "@/components/workspace/diagnostics-dialog";
 import { DeploymentsPanel } from "@/components/workspace/deployments-panel";
+import { DynamicTabBar, type DynamicTab } from "@/components/workspace/dynamic-tab-bar";
+import { LiveSharePanel } from "@/components/workspace/live-share-panel";
 
 // Custom scrollbar styles
 const scrollbarStyles = `
@@ -139,7 +143,12 @@ export default function WorkspacePage({
   const [rebuildLogs, setRebuildLogs] = useState<string[]>([]);
   const [rebuildStage, setRebuildStage] = useState<string>("");
   const [inputMessage, setInputMessage] = useState<string>("");
-  const [activeTab, setActiveTab] = React.useState<"ai" | "deployments">("ai");
+  const [activeTab, setActiveTab] = React.useState<string>("ai");
+  
+  // Live Share state
+  const [liveShareActive, setLiveShareActive] = useState(false);
+  const [liveShareLink, setLiveShareLink] = useState<string | null>(null);
+  const [collaboratorCount, setCollaboratorCount] = useState(0);
   
   // Chat management state
   const [chats, setChats] = useState<Array<{
@@ -1239,6 +1248,132 @@ export default function WorkspacePage({
     return icons[toolName] || FileCode;
   };
 
+  // Live Share handlers
+  const handleStartLiveShare = async () => {
+    try {
+      const res = await fetch(`/api/workspaces/${resolvedParams.id}/liveshare`, {
+        method: 'POST',
+      });
+      
+      const data = await res.json();
+      
+      if (data.success) {
+        setLiveShareActive(true);
+        setLiveShareLink(data.shareLink);
+        setActiveTab('liveshare'); // Auto-switch to Live Share tab
+        toast.success('Live Share started!', {
+          icon: '🎉',
+          description: 'Share the link with your team',
+        });
+      }
+    } catch (error: any) {
+      toast.error('Failed to start Live Share', {
+        description: error.message,
+      });
+    }
+  };
+
+  const handleEndLiveShare = async () => {
+    try {
+      await fetch(`/api/workspaces/${resolvedParams.id}/liveshare`, {
+        method: 'DELETE',
+      });
+      
+      setLiveShareActive(false);
+      setLiveShareLink(null);
+      setCollaboratorCount(0);
+      setActiveTab('ai'); // Switch back to AI tab
+      toast.info('Live Share ended');
+    } catch (error: any) {
+      toast.error('Failed to end Live Share');
+    }
+  };
+
+  // Define dynamic tabs
+  const tabs: DynamicTab[] = React.useMemo(() => {
+    const allTabs: DynamicTab[] = [
+      {
+        id: 'ai',
+        label: 'AI Agent',
+        icon: Brain,
+        priority: 100,
+        content: (
+          <AIAgentPanel
+            workspaceId={workspace?.id || ''}
+            isWorkSpaceRunning={workspace?.status === "RUNNING"}
+            messages={messages}
+            input={inputMessage}
+            setInput={setInputMessage}
+            handleSend={handleSendMessage}
+            isStreaming={isStreaming}
+            favoriteModels={favoriteModels}
+            selectedModel={selectedModel}
+            setSelectedModel={setSelectedModel}
+            expandedTools={expandedTools}
+            setExpandedTools={setExpandedTools}
+            expandedReasoning={expandedReasoning}
+            setExpandedReasoning={setExpandedReasoning}
+            handleOpenFile={handleOpenFile}
+            renderTextWithFileLinks={renderTextWithFileLinks}
+            onStopGeneration={handleStopGeneration}
+            chats={chats}
+            currentChatId={currentChatId}
+            currentChatTitle={chats.find(c => c.id === currentChatId)?.title || "New Chat"}
+            onSelectChat={handleSelectChat}
+            onCreateChat={handleCreateChat}
+          />
+        ),
+      },
+      {
+        id: 'deployments',
+        label: 'Deployments',
+        icon: Rocket,
+        priority: 50,
+        content: <DeploymentsPanel workspaceId={workspace?.id || ''} />,
+      },
+    ];
+
+    // Add Live Share tab only when active
+    if (liveShareActive) {
+      allTabs.push({
+        id: 'liveshare',
+        label: 'Live Share',
+        icon: Users,
+        priority: 150, // Highest priority when active
+        badge: collaboratorCount > 0 ? collaboratorCount : undefined,
+        pulseColor: '#10b981', // Emerald-500
+        content: (
+          <LiveSharePanel
+            workspaceId={workspace?.id || ''}
+            agentBridgeWs={wsRef.current}
+            shareLink={liveShareLink}
+            onEndSession={handleEndLiveShare}
+          />
+        ),
+      });
+    }
+
+    return allTabs;
+  }, [
+    workspace?.id,
+    workspace?.status,
+    liveShareActive,
+    collaboratorCount,
+    messages,
+    inputMessage,
+    isStreaming,
+    favoriteModels,
+    selectedModel,
+    expandedTools,
+    expandedReasoning,
+    chats,
+    currentChatId,
+    liveShareLink,
+  ]);
+
+  // Get active tab content
+  const activeTabContent = tabs.find(t => t.id === activeTab)?.content;
+
   if (loading) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center">
@@ -1291,6 +1426,9 @@ export default function WorkspacePage({
           onStop={handleStop}
           onRestart={handleRestart}
           onShowDiagnostics={() => setShowDiagnostics(true)}
+          onStartLiveShare={handleStartLiveShare}
+          onEndLiveShare={handleEndLiveShare}
+          liveShareActive={liveShareActive}
           stopping={stopping}
           restarting={restarting}
         />
@@ -1316,62 +1454,19 @@ export default function WorkspacePage({
             />
           </div>
 
-          {/* Right Panel with Tabs */}
+          {/* Right Panel with Dynamic Tabs */}
           <div className="w-[500px] flex flex-col bg-black/40 border-l border-zinc-800">
-            {/* Tab Headers */}
-            <div className="flex border-b border-zinc-800 bg-zinc-950/50">
-              <button
-                onClick={() => setActiveTab("ai")}
-                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-                  activeTab === "ai"
-                    ? "text-emerald-400 border-b-2 border-emerald-500"
-                    : "text-zinc-500 hover:text-zinc-300"
-                }`}
-              >
-                AI Agent
-              </button>
-              <button
-                onClick={() => setActiveTab("deployments")}
-                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-                  activeTab === "deployments"
-                    ? "text-emerald-400 border-b-2 border-emerald-500"
-                    : "text-zinc-500 hover:text-zinc-300"
-                }`}
-              >
-                Deployments
-              </button>
-            </div>
+            {/* Dynamic Tab Bar */}
+            <DynamicTabBar
+              tabs={tabs}
+              activeTabId={activeTab}
+              onTabChange={setActiveTab}
+              maxVisible={2}
+            />
 
-            {/* Tab Content */}
+            {/* Active Tab Content */}
             <div className="flex-1 overflow-hidden">
-              {activeTab === "ai" ? (
-                <AIAgentPanel
-                  workspaceId={workspace.id}
-                  isWorkSpaceRunning={workspace.status === "RUNNING"}
-                  messages={messages}
-                  input={inputMessage}
-                  setInput={setInputMessage}
-                  handleSend={handleSendMessage}
-                  isStreaming={isStreaming}
-                  favoriteModels={favoriteModels}
-                  selectedModel={selectedModel}
-                  setSelectedModel={setSelectedModel}
-                  expandedTools={expandedTools}
-                  setExpandedTools={setExpandedTools}
-                  expandedReasoning={expandedReasoning}
-                  setExpandedReasoning={setExpandedReasoning}
-                  handleOpenFile={handleOpenFile}
-                  renderTextWithFileLinks={renderTextWithFileLinks}
-                  onStopGeneration={handleStopGeneration}
-                  chats={chats}
-                  currentChatId={currentChatId}
-                  currentChatTitle={chats.find(c => c.id === currentChatId)?.title || "New Chat"}
-                  onSelectChat={handleSelectChat}
-                  onCreateChat={handleCreateChat}
-                />
-              ) : (
-                <DeploymentsPanel workspaceId={workspace.id} />
-              )}
+              {activeTabContent}
             </div>
           </div>
         </div>

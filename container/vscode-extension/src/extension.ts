@@ -7,6 +7,7 @@ import { generateCommitMessage, getGitRepository } from "./commit-generator";
 import { getSelectedCodeContext, formatCodeContext, formatCodeWithInstruction, createWebUIMessageSender } from "./code-context";
 import { registerSelectionMenu, setWebUIMessageSender } from "./selection-menu";
 import { registerBrowserPanel } from "./browser-panel";
+import { LiveShareMonitor } from "./liveshare-monitor";
 
 // Create output channel for logging
 const outputChannel = vscode.window.createOutputChannel("Kalpana");
@@ -47,7 +48,10 @@ interface VSCodeCommand {
     | "createCheckpoint"
     | "restoreCheckpoint"
     | "listCheckpoints"
-    | "getCheckpointDiff";
+    | "getCheckpointDiff"
+    | "startLiveShare"
+    | "endLiveShare"
+    | "getLiveShareParticipants";
   payload: any;
 }
 
@@ -87,6 +91,9 @@ export function activate(context: vscode.ExtensionContext) {
   
   context.subscriptions.push(completionDisposable);
   console.log("✅ Autocomplete provider registered");
+
+  // ========== Initialize Live Share Monitor ==========
+  const liveShareMonitor = new LiveShareMonitor();
 
   // ========== WebSocket Server for Direct Communication ==========
   let wss: WebSocketServer;
@@ -376,6 +383,50 @@ export function activate(context: vscode.ExtensionContext) {
             id: command.id,
             success: true,
             data: { diff },
+          };
+        }
+
+        case "startLiveShare": {
+          console.log('🚀 Starting Live Share session...');
+          try {
+            const shareLink = await liveShareMonitor.startSession();
+            return {
+              id: command.id,
+              success: true,
+              data: { shareLink },
+            };
+          } catch (error: any) {
+            return {
+              id: command.id,
+              success: false,
+              error: error.message,
+            };
+          }
+        }
+
+        case "endLiveShare": {
+          console.log('🛑 Ending Live Share session...');
+          try {
+            await liveShareMonitor.endSession();
+            return {
+              id: command.id,
+              success: true,
+            };
+          } catch (error: any) {
+            return {
+              id: command.id,
+              success: false,
+              error: error.message,
+            };
+          }
+        }
+
+        case "getLiveShareParticipants": {
+          const participants = liveShareMonitor.getParticipants();
+          return {
+            id: command.id,
+            success: true,
+            data: { participants, count: participants.length },
           };
         }
 
@@ -970,6 +1021,25 @@ export function activate(context: vscode.ExtensionContext) {
   // Create WebSocket message sender for code context
   let sendToWebUI: ((message: any) => Promise<void>) | null = null;
   let connectedClients: Set<WebSocket> = new Set();
+
+  // ========== Initialize Live Share Event Broadcasting ==========
+  liveShareMonitor.initialize().then((success) => {
+    if (success) {
+      outputChannel.appendLine('✅ Live Share monitoring enabled');
+      
+      // Broadcast Live Share events to all connected clients
+      liveShareMonitor.onEvent((event) => {
+        outputChannel.appendLine(`📡 Broadcasting Live Share event: ${event.type}`);
+        connectedClients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(event));
+          }
+        });
+      });
+    } else {
+      outputChannel.appendLine('⚠️ Live Share monitoring not available (extension may not be installed)');
+    }
+  });
 
   // Track all connected WebSocket clients
   wss.on('connection', (ws: WebSocket) => {

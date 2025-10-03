@@ -39,6 +39,10 @@ RUN bun install && \
     bun run bundle && \
     npx @vscode/vsce package --no-dependencies -o kalpana-diagnostics.vsix
 
+# Note: Live Share is not available for code-server
+# We'll use our custom collaboration system via WebSocket instead
+# The LiveShareMonitor will gracefully handle the absence of the extension
+
 # Copy VS Code presets
 COPY presets /presets
 

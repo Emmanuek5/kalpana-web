@@ -81,23 +81,37 @@ body {
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
 }
 
-/* Scrollbar styling - green on oil black */
+/* Scrollbar styling - subtle dark theme */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--background);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--primary);
-  border-radius: 5px;
+  background: rgba(63, 63, 70, 0.5); /* zinc-700 with opacity */
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #00cc70;
+  background: rgba(82, 82, 91, 0.7); /* zinc-600 with opacity */
+}
+
+/* Thin scrollbar utility class */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.scrollbar-thumb-zinc-800::-webkit-scrollbar-thumb {
+  background: rgba(39, 39, 42, 0.6); /* zinc-800 with opacity */
+}
+
+.scrollbar-track-transparent::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* Selection styling */

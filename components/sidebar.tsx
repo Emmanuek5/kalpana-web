@@ -16,21 +16,33 @@ import {
   ChevronUp,
   Bot,
   Rocket,
+  Coins,
+  Users as UsersIcon,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { Button } from "./ui/button";
+import { Skeleton } from "./ui/skeleton";
+import { TeamSwitcher } from "./workspace/team-switcher";
+import { useTeam } from "@/lib/team-context";
 
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
+  const { currentTeam } = useTeam();
   const [collapsed, setCollapsed] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(
     pathname.startsWith("/dashboard/settings")
   );
   const [user, setUser] = useState<any>(null);
+  const [credits, setCredits] = useState<{
+    remaining: number;
+    totalCredits: number;
+  } | null>(null);
+  const [loadingCredits, setLoadingCredits] = useState(true);
 
   useEffect(() => {
     fetchUser();
+    fetchCredits();
   }, []);
 
   const fetchUser = async () => {
@@ -42,6 +54,20 @@ export function Sidebar() {
       }
     } catch (error) {
       console.error("Failed to fetch user:", error);
+    }
+  };
+
+  const fetchCredits = async () => {
+    try {
+      const res = await fetch("/api/openrouter/credits");
+      if (res.ok) {
+        const data = await res.json();
+        setCredits(data);
+      }
+    } catch (error) {
+      console.error("Failed to fetch credits:", error);
+    } finally {
+      setLoadingCredits(false);
     }
   };
 
@@ -75,6 +101,16 @@ export function Sidebar() {
       icon: Settings,
       active: pathname === "/dashboard/presets",
     },
+    ...(currentTeam
+      ? [
+          {
+            name: "Team Settings",
+            href: `/dashboard/teams/${currentTeam.id}`,
+            icon: UsersIcon,
+            active: pathname.startsWith(`/dashboard/teams/${currentTeam.id}`),
+          },
+        ]
+      : []),
   ];
 
   const settingsItems = [
@@ -213,33 +249,54 @@ export function Sidebar() {
 
       {/* User Section */}
       <div className="border-t border-zinc-800 p-3 space-y-1.5 mt-auto">
-        {/* Profile */}
-        <button
-          onClick={() => router.push("/dashboard/settings")}
-          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-zinc-800/50 transition-all ${
-            collapsed ? "justify-center" : ""
-          } ${pathname === "/dashboard/settings" ? "bg-emerald-500/15" : ""}`}
-        >
-          {user?.image ? (
-            <img
-              src={user.image}
-              alt={user.name || user.email}
-              className="h-8 w-8 rounded-full shrink-0 ring-2 ring-zinc-700/50 object-cover"
-            />
-          ) : (
-            <div className="h-8 w-8 rounded-full bg-gradient-to-br from-emerald-600/20 to-emerald-500/10 flex items-center justify-center shrink-0 ring-2 ring-emerald-700/30">
-              <User className="h-4 w-4 text-emerald-400" />
+        {/* Credits Display */}
+        {!collapsed && (
+          <div className="px-3 py-2 rounded-lg bg-zinc-900/50 border border-zinc-800/50">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-zinc-500">Credits</span>
+              {loadingCredits ? (
+                <Skeleton className="h-3 w-12 bg-zinc-800" />
+              ) : credits ? (
+                <span className={`text-xs font-bold ${credits.remaining < 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                  ${credits.remaining.toFixed(2)}
+                </span>
+              ) : null}
             </div>
-          )}
-          {!collapsed && (
-            <div className="flex-1 min-w-0 text-left">
-              <div className="text-sm font-medium text-white truncate">
-                {user?.name || user?.email?.split('@')[0] || 'Account'}
+            {!loadingCredits && credits && (
+              <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
+                <div
+                  className={`h-full ${credits.remaining < 0 ? 'bg-red-500' : 'bg-emerald-500'}`}
+                  style={{
+                    width: `${Math.max(0, (credits.remaining / credits.totalCredits) * 100)}%`,
+                  }}
+                />
               </div>
-              <div className="text-xs text-zinc-500 truncate">View Profile</div>
-            </div>
-          )}
-        </button>
+            )}
+          </div>
+        )}
+
+        {/* Team Switcher */}
+        {!collapsed && user && <TeamSwitcher user={user} />}
+
+        {/* Collapsed user avatar */}
+        {collapsed && (
+          <button
+            onClick={() => router.push("/dashboard/settings")}
+            className="w-full flex justify-center"
+          >
+            {user?.image ? (
+              <img
+                src={user.image}
+                alt={user.name || user.email}
+                className="h-8 w-8 rounded-full ring-2 ring-zinc-700/50 object-cover"
+              />
+            ) : (
+              <div className="h-8 w-8 rounded-full bg-gradient-to-br from-emerald-600/20 to-emerald-500/10 flex items-center justify-center ring-2 ring-emerald-700/30">
+                <User className="h-4 w-4 text-emerald-400" />
+              </div>
+            )}
+          </button>
+        )}
 
         {/* Logout */}
         <Button

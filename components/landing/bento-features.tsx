@@ -113,8 +113,9 @@ function AIAgentDemo() {
     "I'll create an authentication component with login and signup forms. Let me generate that for you...";
 
   useEffect(() => {
-    const timer = setTimeout(() => {
+    const runAnimation = () => {
       setIsTyping(true);
+      setTypedResponse("");
 
       let charIndex = 0;
       const typeInterval = setInterval(() => {
@@ -124,8 +125,8 @@ function AIAgentDemo() {
         } else {
           clearInterval(typeInterval);
           setTimeout(() => {
-            setMessages([
-              ...messages,
+            setMessages((prev) => [
+              ...prev,
               {
                 role: "assistant",
                 text: fullResponse,
@@ -134,13 +135,24 @@ function AIAgentDemo() {
             ]);
             setIsTyping(false);
             setTypedResponse("");
+            
+            // Reset and loop after 3 seconds
+            setTimeout(() => {
+              setMessages([{
+                role: "user",
+                text: "Create a React component for user auth",
+                time: "2:34 PM",
+              }]);
+              runAnimation();
+            }, 3000);
           }, 500);
         }
       }, 30);
 
       return () => clearInterval(typeInterval);
-    }, 2000);
+    };
 
+    const timer = setTimeout(runAnimation, 2000);
     return () => clearTimeout(timer);
   }, []);
 
@@ -265,8 +277,11 @@ function MiniIDEDemo() {
       setCurrentLine((prev) => {
         if (prev < codeLines.length - 1) {
           return prev + 1;
+        } else {
+          // Reset and loop
+          setTimeout(() => setCurrentLine(0), 2000);
+          return prev;
         }
-        return prev;
       });
     }, 400);
 
@@ -360,8 +375,14 @@ function TerminalDemo() {
           const nextLine = prev + 1;
           setLines((prevLines) => [...prevLines, terminalLines[nextLine]]);
           return nextLine;
+        } else {
+          // Reset and loop
+          setTimeout(() => {
+            setCurrentLine(0);
+            setLines([terminalLines[0]]);
+          }, 2000);
+          return prev;
         }
-        return prev;
       });
     }, 800);
 
@@ -426,8 +447,14 @@ function GitHubDemo() {
           const nextStep = prev + 1;
           setLines((prevLines) => [...prevLines, terminalSteps[nextStep]]);
           return nextStep;
+        } else {
+          // Reset and loop
+          setTimeout(() => {
+            setCurrentStep(0);
+            setLines([terminalSteps[0]]);
+          }, 2000);
+          return prev;
         }
-        return prev;
       });
     }, 600);
 

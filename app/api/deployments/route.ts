@@ -15,27 +15,56 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Get all deployments for this user (both standalone and workspace-based)
-    const deployments = await prisma.deployment.findMany({
-      where: {
-        userId: session.user.id,
-      },
-      include: {
-        domain: true,
-        workspace: {
-          select: {
-            id: true,
-            name: true,
-            status: true,
+    const teamId = request.nextUrl.searchParams.get("teamId");
+
+    let deployments;
+
+    if (teamId) {
+      // Check if user is a team member
+      const member = await prisma.teamMember.findFirst({
+        where: { teamId, userId: session.user.id },
+      });
+
+      if (!member) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+
+      // Fetch team deployments
+      deployments = await prisma.deployment.findMany({
+        where: { teamId },
+        include: {
+          domain: true,
+          workspace: {
+            select: { id: true, name: true, status: true },
+          },
+          builds: {
+            take: 1,
           },
         },
-        builds: {
-          orderBy: { createdAt: "desc" },
-          take: 1, // Get latest build
+        orderBy: { createdAt: "desc" },
+      });
+    } else {
+      // Fetch personal deployments
+      deployments = await prisma.deployment.findMany({
+        where: {
+          userId: session.user.id,
         },
-      },
-      orderBy: { createdAt: "desc" },
-    });
+        include: {
+          domain: true,
+          workspace: {
+            select: { id: true, name: true, status: true },
+          },
+          builds: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      
+      // Filter out team deployments
+      deployments = deployments.filter((d: any) => !d.teamId);
+    }
 
     return NextResponse.json({ deployments });
   } catch (error: any) {
@@ -64,6 +93,7 @@ export async function POST(request: NextRequest) {
       description,
       githubRepo,
       githubBranch,
+      githubSource,
       rootDirectory,
       buildCommand,
       startCommand,
@@ -75,6 +105,7 @@ export async function POST(request: NextRequest) {
       domainId,
       autoRebuild,
       framework,
+      teamId,
     } = body;
 
     // Validate required fields
@@ -111,10 +142,22 @@ export async function POST(request: NextRequest) {
       ? require("crypto").randomBytes(32).toString("hex")
       : null;
 
+    // If teamId provided, verify user is a member
+    if (teamId) {
+      const member = await prisma.teamMember.findFirst({
+        where: { teamId, userId: session.user.id },
+      });
+
+      if (!member) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+    }
+
     // Create deployment with encrypted environment variables
     const deployment = await prisma.deployment.create({
       data: {
         name,
+        githubSource: githubSource || "personal",
         description,
         githubRepo,
         githubBranch: githubBranch || "main",
@@ -131,6 +174,7 @@ export async function POST(request: NextRequest) {
         webhookSecret,
         framework,
         userId: session.user.id,
+        teamId: teamId || undefined,
         status: "STOPPED",
       },
       include: {

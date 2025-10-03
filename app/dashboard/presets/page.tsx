@@ -258,7 +258,7 @@ export default function PresetsPage() {
       <Sidebar />
 
       <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="border-b border-zinc-800/50 bg-zinc-950/50 backdrop-blur-sm">
+        <div className="border-b border-zinc-800/50 bg-zinc-950/50 backdrop-blur-sm relative z-50">
           <div className="px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <h1 className="text-lg font-medium text-zinc-100">Presets</h1>
@@ -334,14 +334,7 @@ export default function PresetsPage() {
                   </div>
                 </div>
               </div>
-              {loading ? (
-                <div className="flex items-center justify-center py-16">
-                  <div className="relative">
-                    <div className="absolute inset-0 blur-2xl bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 animate-pulse" />
-                    <Loader2 className="h-10 w-10 text-emerald-400 animate-spin relative z-10" />
-                  </div>
-                </div>
-              ) : presets.length === 0 ? (
+              {presets.length === 0 && !loading ? (
                 <Card className="p-20 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 text-center backdrop-blur-xl relative overflow-hidden group">
                   <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 via-transparent to-cyan-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
                   <div className="max-w-md mx-auto relative z-10">
@@ -370,6 +363,22 @@ export default function PresetsPage() {
                     </Button>
                   </div>
                 </Card>
+              ) : loading ? (
+                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {[1, 2, 3].map((i) => (
+                    <Card key={i} className="p-5 bg-zinc-900/50 border-zinc-800/60">
+                      <div className="space-y-4">
+                        <div className="flex items-start justify-between mb-2">
+                          <Skeleton className="h-5 w-5 bg-zinc-800" />
+                          <Skeleton className="h-6 w-20 bg-zinc-800" />
+                        </div>
+                        <Skeleton className="h-5 w-32 bg-zinc-800" />
+                        <Skeleton className="h-4 w-full bg-zinc-800" />
+                        <Skeleton className="h-6 w-24 bg-zinc-800" />
+                      </div>
+                    </Card>
+                  ))}
+                </div>
               ) : filteredPresets.length === 0 ? (
                 <Card className="p-10 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 text-center">
                   <div className="max-w-md mx-auto">
