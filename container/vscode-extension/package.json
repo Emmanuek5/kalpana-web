@@ -85,6 +85,16 @@
         "command": "kalpana.showSelectionMenu",
         "title": "Kalpana: Show Selection Menu",
         "icon": "$(menu)"
+      },
+      {
+        "command": "kalpana.openBrowser",
+        "title": "Kalpana: Open Mini Browser",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "kalpana.openPort",
+        "title": "Kalpana: Open Port in Browser",
+        "icon": "$(plug)"
       }
     ],
     "viewsContainers": {
@@ -159,6 +169,16 @@
         "key": "ctrl+k ctrl+a",
         "mac": "cmd+k cmd+a",
         "when": "editorHasSelection"
+      },
+      {
+        "command": "kalpana.openBrowser",
+        "key": "ctrl+k ctrl+b",
+        "mac": "cmd+k cmd+b"
+      },
+      {
+        "command": "kalpana.openPort",
+        "key": "ctrl+k ctrl+p",
+        "mac": "cmd+k cmd+p"
       }
     ]
   },

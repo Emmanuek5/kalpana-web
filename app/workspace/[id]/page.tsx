@@ -28,6 +28,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
+import { toast } from "sonner";
 import { WorkspaceHeader } from "@/components/workspace/workspace-header";
 import { WorkspaceEditor } from "@/components/workspace/workspace-editor";
 import { AIAgentPanel } from "@/components/workspace/ai-agent-panel";
@@ -920,16 +921,48 @@ export default function WorkspacePage({
               }
 
               // Handle error events
-              if (data.type === "error") {
+              if (data.type === "error" || data.type === "credits_error") {
                 console.error("Stream error:", data.error);
                 setIsStreaming(false);
+                
+                // Show toast for credits error
+                if (data.type === "credits_error" || data.isCreditsError) {
+                  toast.error("Insufficient OpenRouter Credits", {
+                    description: "Please add more credits to continue using AI features.",
+                    action: {
+                      label: "Add Credits",
+                      onClick: () => window.open("https://openrouter.ai/settings/credits", "_blank"),
+                    },
+                    duration: 10000,
+                  });
+                  
+                  // Also save to notification database
+                  fetch('/api/notifications', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      type: "error",
+                      title: "Insufficient OpenRouter Credits",
+                      message: "Please add more credits at https://openrouter.ai/settings/credits to continue using AI features.",
+                      actionLabel: "Add Credits",
+                      actionUrl: "https://openrouter.ai/settings/credits",
+                      workspaceId: workspace?.id,
+                    }),
+                  }).catch(err => console.error('Failed to save notification:', err));
+                } else {
+                  // Regular error toast
+                  toast.error("Error", {
+                    description: data.error || "An error occurred during processing",
+                  });
+                }
+                
                 setMessages((prev) => {
                   const updated = [...prev];
                   const lastMsg = updated[updated.length - 1];
                   if (lastMsg && lastMsg.role === "assistant") {
                     lastMsg.parts.push({
                       type: "checkpoint",
-                      title: "Error occurred",
+                      title: data.isCreditsError ? "Insufficient Credits" : "Error occurred",
                       description: data.error || "An error occurred during processing",
                       status: "error",
                     });
@@ -991,89 +1024,188 @@ export default function WorkspacePage({
   }, []);
 
   // Handle code context messages from VS Code extension
+  const wsRef = React.useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
+  const reconnectDelayRef = React.useRef(1000);
+  const shouldReconnectRef = React.useRef(false);
+
+  const handleWorkspaceSocketMessage = React.useCallback(
+    (event: MessageEvent) => {
+      console.log("📨 WebSocket message received:", event.data);
+
+      try {
+        const data = JSON.parse(event.data as string);
+        console.log("📦 Parsed message:", data);
+
+        if (data.type === "codeContext") {
+          const { action, payload } = data;
+          console.log("🎯 Code context action:", action, payload);
+
+          if (action === "addToChat") {
+            const context = `@${payload.filePath}:${payload.lineStart}-${payload.lineEnd}\n\n`;
+
+            setInputMessage((prev) => {
+              console.log("✅ Adding code to input, current:", prev.length, "chars");
+              return prev + context;
+            });
+
+            console.log("💬 Code added to chat context:", payload.filePath);
+
+            setTimeout(() => {
+              const textarea = document.querySelector("textarea");
+              if (textarea) {
+                textarea.focus();
+                textarea.scrollTop = textarea.scrollHeight;
+                console.log("✅ Input focused and scrolled");
+              }
+            }, 100);
+          } else if (action === "sendToAgent") {
+            const message = `${payload.instruction}\n\n@${payload.filePath}:${payload.lineStart}-${payload.lineEnd}`;
+            console.log("✨ Sending to agent:", payload.instruction);
+            handleSendMessage(message);
+          }
+        }
+      } catch (error) {
+        console.error("❌ Failed to parse WebSocket message:", error);
+      }
+    },
+    [handleSendMessage]
+  );
+
   React.useEffect(() => {
     if (!workspace || !workspace.agentPort) {
       return;
     }
 
-    // Connect to WebSocket on the workspace's agent port
-    const ws = new WebSocket(`ws://localhost:${workspace.agentPort}`);
+    shouldReconnectRef.current = true;
+    reconnectDelayRef.current = 1000;
 
-    ws.onopen = () => {
-      console.log(`Connected to VS Code extension WebSocket on port ${workspace.agentPort}`);
+    const scheduleReconnect = () => {
+      if (!shouldReconnectRef.current) {
+        return;
+      }
+
+      if (reconnectTimeoutRef.current) {
+        return;
+      }
+
+      const delay = reconnectDelayRef.current;
+      reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        connect();
+      }, delay);
+
+      reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 2, 5000);
     };
 
-    ws.onmessage = (event) => {
-      console.log('📨 WebSocket message received:', event.data);
-      
+    const connect = () => {
+      if (!shouldReconnectRef.current) {
+        return;
+      }
+
       try {
-        const data = JSON.parse(event.data);
-        console.log('📦 Parsed message:', data);
-        
-        if (data.type === 'codeContext') {
-          const { action, payload } = data;
-          console.log('🎯 Code context action:', action, payload);
-          
-          if (action === 'addToChat') {
-            // Format code context with @filepath:LN format (without code, agent will use readFileLines tool)
-            const context = `@${payload.filePath}:${payload.lineStart}-${payload.lineEnd}\n\n`;
-            
-            // Add to input
-            setInputMessage(prev => {
-              console.log('✅ Adding code to input, current:', prev.length, 'chars');
-              return prev + context;
-            });
-            
-            // Show notification
-            console.log('💬 Code added to chat context:', payload.filePath);
-            
-            // Focus the input
-            setTimeout(() => {
-              const textarea = document.querySelector('textarea');
-              if (textarea) {
-                textarea.focus();
-                textarea.scrollTop = textarea.scrollHeight;
-                console.log('✅ Input focused and scrolled');
-              }
-            }, 100);
-          } else if (action === 'sendToAgent') {
-            // Format message with instruction and @filepath:LN format (without code)
-            const message = `${payload.instruction}\n\n@${payload.filePath}:${payload.lineStart}-${payload.lineEnd}`;
-            
-            // Show notification
-            console.log('✨ Sending to agent:', payload.instruction);
-            
-            // Send immediately
-            handleSendMessage(message);
+        const ws = new WebSocket(`ws://localhost:${workspace.agentPort}`);
+        wsRef.current = ws;
+
+        // Set up keepalive ping interval
+        let pingInterval: NodeJS.Timeout | null = null;
+
+        ws.onopen = () => {
+          console.log(`Connected to VS Code extension WebSocket on port ${workspace.agentPort}`);
+          reconnectDelayRef.current = 1000;
+          if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
           }
-        }
+
+          // Start sending ping messages every 25 seconds to keep connection alive
+          pingInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(JSON.stringify({ type: 'ping' }));
+              } catch (error) {
+                console.error("❌ Failed to send ping:", error);
+              }
+            }
+          }, 25000);
+        };
+
+        ws.onmessage = handleWorkspaceSocketMessage;
+
+        ws.onerror = (error) => {
+          console.error("❌ WebSocket error:", error);
+          if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+          }
+          ws.close();
+        };
+
+        ws.onclose = (event) => {
+          if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+          }
+          if (!shouldReconnectRef.current) {
+            return;
+          }
+          console.warn("⚠️ WebSocket closed:", event.reason || event.code);
+          scheduleReconnect();
+        };
       } catch (error) {
-        console.error('❌ Error handling WebSocket message:', error);
+        console.error("❌ Failed to establish WebSocket connection:", error);
+        scheduleReconnect();
       }
     };
 
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
-
-    ws.onclose = () => {
-      console.log('Disconnected from VS Code extension WebSocket');
-    };
+    connect();
 
     return () => {
-      ws.close();
+      shouldReconnectRef.current = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch (closeError) {
+          console.error("⚠️ Error closing WebSocket:", closeError);
+        }
+      }
+      wsRef.current = null;
     };
-  }, [workspace?.agentPort]);
+  }, [workspace?.agentPort, handleWorkspaceSocketMessage]);
 
   const getToolDisplayName = (toolName: string): string => {
     const names: Record<string, string> = {
-      listFiles: "File Listing",
+      listFiles: "List Files",
       readFile: "File Read",
+      readFileLines: "File Read (Lines)",
       writeFile: "File Write",
-      runCommand: "Command Execution",
+      readMultipleFiles: "Read Multiple Files",
+      moveFile: "Move File",
+      deleteFile: "Delete File",
+      findFiles: "Find Files",
       searchCode: "Code Search",
+      runCommand: "Command Execution",
+      installPackages: "Install Packages",
       gitCommit: "Git Commit",
       gitPush: "Git Push",
+      gitBranch: "Git Branch",
+      gitStash: "Git Stash",
+      scrapeWebPage: "Web Scrape",
+      runTests: "Run Tests",
+      getProblems: "Problems",
+      getLintErrors: "Lint Errors",
+      getConsoleLogs: "Console Logs",
+      formatDocument: "Format Document",
+      goToDefinition: "Go To Definition",
+      findReferences: "Find References",
+      searchSymbols: "Search Symbols",
+      getHover: "Hover Info",
+      getCodeActions: "Code Actions",
+      applyCodeAction: "Apply Code Action",
     };
     return names[toolName] || toolName;
   };

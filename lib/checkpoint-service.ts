@@ -136,7 +136,7 @@ export class CheckpointService {
       }
 
       // Get checkpoint metadata
-      const message = await prisma.message.findUnique({
+      const message: any = await prisma.message.findUnique({
         where: { id: checkpointId },
       });
 
@@ -156,10 +156,10 @@ export class CheckpointService {
         },
       });
 
-      // Delete all messages after this checkpoint
-      await prisma.message.deleteMany({
+      // Delete all messages after this checkpoint in the same chat
+      await (prisma.message as any).deleteMany({
         where: {
-          workspaceId,
+          chatId: message.chatId,
           createdAt: {
             gt: message.createdAt,
           },

@@ -105,3 +105,49 @@ body {
   background: var(--primary);
   color: var(--primary-foreground);
 }
+
+/* ContentEditable placeholder */
+[contenteditable][data-placeholder]:empty:before {
+  content: attr(data-placeholder);
+  color: rgb(113 113 122); /* zinc-500 */
+  pointer-events: none;
+  position: absolute;
+}
+
+/* Mention input styling */
+.mention-input[contenteditable] {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.mention-input[contenteditable]:empty:before {
+  color: rgb(113 113 122); /* zinc-500 */
+}
+
+/* Ensure mentions are inline */
+.mention-input span {
+  display: inline;
+}
+
+/* 3D Feature Animations */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes orbit {
+  0% {
+    transform: rotateX(75deg) rotateZ(0deg);
+  }
+  100% {
+    transform: rotateX(75deg) rotateZ(360deg);
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s infinite;
+}

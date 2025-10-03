@@ -1,0 +1,403 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  String      @id @default(auto()) @map("_id") @db.ObjectId
+  email               String      @unique
+  name                String?
+  image               String?
+  emailVerified       Boolean     @default(false)
+  
+  // OAuth
+  githubId            String?     @unique
+  githubToken         String?     // Encrypted
+  
+  // OpenRouter settings
+  openrouterApiKey    String?     // User's personal OpenRouter API key
+  favoriteModels      String[]    @default([]) // Array of favorite model IDs (max 10)
+  defaultModel        String?     // Default model to use in chat
+  
+  // Relations
+  workspaces          Workspace[]
+  sessions            Session[]
+  accounts            Account[]
+  presets             Preset[]
+  domains             Domain[]
+  agents              Agent[]
+  deployments         Deployment[]
+  
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+}
+
+model Session {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId       String   @db.ObjectId
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt    DateTime
+  token        String   @unique
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+model Account {
+  id                String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String   @db.ObjectId
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId         String
+  providerId        String
+  accessToken       String?
+  refreshToken      String?
+  idToken           String?
+  expiresAt         DateTime?
+  scope             String?
+  password          String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  
+  @@unique([identifier, value])
+}
+
+model Workspace {
+  id              String          @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  description     String?
+  
+  // Container metadata
+  containerId     String?
+  vscodePort      Int?
+  agentPort       Int?
+  status          WorkspaceStatus @default(STOPPED)
+  
+  // Configuration
+  githubRepo      String?
+  githubBranch    String?         @default("main")
+  nixConfig       String?
+  template        String?
+  preset          String?         @default("default")
+  
+  // User relation
+  userId          String          @db.ObjectId
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  chats           Chat[]
+  deployments     Deployment[]
+  checkpoints     AgentCheckpoint[]
+  
+  // Metadata
+  lastAccessedAt  DateTime        @default(now())
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  @@index([userId])
+  @@index([status])
+  @@index([lastAccessedAt])
+}
+
+model Chat {
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  workspaceId     String    @db.ObjectId
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  title           String    @default("New Chat")
+  description     String?
+  
+  // Relations
+  messages        Message[]
+  
+  // Metadata
+  isPinned        Boolean   @default(false)
+  lastMessageAt   DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([workspaceId])
+  @@index([lastMessageAt])
+  @@index([createdAt])
+}
+
+enum WorkspaceStatus {
+  STOPPED
+  STARTING
+  RUNNING
+  STOPPING
+  ERROR
+}
+
+model Preset {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  description     String?
+  
+  // VS Code settings (JSON string)
+  settings        String   // JSON stringified settings.json
+  
+  // Extensions (array of extension IDs)
+  extensions      String[] @default([])
+  
+  // User relation
+  userId          String   @db.ObjectId
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  updatedAt       DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+model Message {
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  chatId          String    @db.ObjectId
+  chat            Chat      @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  
+  role            String    // "user" or "assistant"
+  content         String    // JSON stringified message parts array
+  
+  // Checkpoint/resume support
+  status          String?   @default("complete") // "streaming", "complete", "error"
+  checkpointData  String?   // JSON stringified checkpoint state
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([chatId])
+  @@index([createdAt])
+  @@index([status])
+}
+
+model AgentCheckpoint {
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  workspaceId     String    @db.ObjectId
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  messageId       String    @db.ObjectId  // Associated message being generated
+  
+  // Checkpoint state
+  stepNumber      Int       // Current step number
+  textCollected   String    @default("")
+  toolCalls       String    @default("[]") // JSON array
+  toolResults     String    @default("[]") // JSON array
+  reasoning       String    @default("")
+  
+  // Status tracking
+  status          String    @default("pending") // "pending", "processing", "completed", "error"
+  lockedAt        DateTime? // For SKIP LOCKED pattern
+  lockedBy        String?   // Process/worker ID that locked this
+  
+  // Metadata
+  model           String    // Model being used
+  temperature     Float?
+  maxSteps        Int       @default(10)
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  completedAt     DateTime?
+  
+  @@index([workspaceId])
+  @@index([messageId])
+  @@index([status, lockedAt]) // For SKIP LOCKED queries
+  @@index([createdAt])
+}
+
+enum DeploymentStatus {
+  STOPPED
+  BUILDING
+  DEPLOYING
+  RUNNING
+  STOPPING
+  ERROR
+}
+
+model Build {
+  id              String      @id @default(auto()) @map("_id") @db.ObjectId
+  deploymentId    String      @db.ObjectId
+  deployment      Deployment  @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  
+  status          BuildStatus @default(PENDING)
+  logs            String?     // Build logs
+  errorMessage    String?     // Error message if build failed
+  
+  // GitHub integration
+  commitHash      String?
+  commitMessage   String?
+  branch          String?
+  triggeredBy     String?     // "manual", "webhook", "auto"
+  
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime    @default(now())
+  
+  @@index([deploymentId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum BuildStatus {
+  PENDING
+  BUILDING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+model Domain {
+  id              String      @id @default(auto()) @map("_id") @db.ObjectId
+  domain          String      @unique
+  verified        Boolean     @default(false)
+  isDefault       Boolean     @default(false)
+  
+  // DNS verification
+  verificationToken String?   @unique
+  verifiedAt      DateTime?
+  
+  // SSL/TLS
+  sslEnabled      Boolean     @default(false)
+  
+  // User relation
+  userId          String      @db.ObjectId
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  deployments     Deployment[] @relation("DeploymentDomain")
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  
+  @@index([userId])
+  @@index([verified])
+}
+
+model Deployment {
+  id              String            @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  description     String?
+  
+  // GitHub repository (for standalone deployments)
+  githubRepo      String?           // e.g., "owner/repo"
+  githubBranch    String?           @default("main")
+  rootDirectory   String?           // Root directory in repo (for monorepos)
+  
+  // Container metadata
+  containerId     String?
+  port            Int?              // Application port inside container
+  exposedPort     Int?              // Host port (if no base URL)
+  status          DeploymentStatus  @default(STOPPED)
+  
+  // Build configuration
+  buildCommand    String?           // e.g., "npm run build"
+  startCommand    String            // e.g., "npm start"
+  installCommand  String?           // e.g., "npm install" or "yarn install"
+  workingDir      String?           // Directory to run commands in
+  envVars         String?           // JSON stringified environment variables
+  framework       String?           // Framework detection: nextjs, vite, etc.
+  
+  // Network configuration
+  subdomain       String?           // Subdomain for this deployment
+  domainId        String?           @db.ObjectId
+  domain          Domain?           @relation("DeploymentDomain", fields: [domainId], references: [id], onDelete: SetNull)
+  customDomain    String?           // Full custom domain if not using subdomain
+  
+  // Auto-rebuild settings
+  autoRebuild     Boolean           @default(false)
+  webhookSecret   String?           // GitHub webhook secret
+  
+  // User relation (for standalone deployments)
+  userId          String            @db.ObjectId
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Workspace relation (OPTIONAL - for workspace-based deployments)
+  workspaceId     String?           @db.ObjectId
+  workspace       Workspace?        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  builds          Build[]
+  
+  // Metadata
+  lastDeployedAt  DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  @@index([userId])
+  @@index([workspaceId])
+  @@index([status])
+  @@index([subdomain])
+  @@index([domainId])
+  @@index([githubRepo])
+}
+
+enum AgentStatus {
+  IDLE
+  CLONING
+  RUNNING
+  COMPLETED
+  ERROR
+  PUSHING
+}
+
+model Agent {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  task            String        // The task description given to agent
+  
+  // GitHub repository info
+  githubRepo      String        // Full repo name (e.g., "owner/repo")
+  sourceBranch    String        @default("main")
+  targetBranch    String        // Branch to push changes to
+  
+  // Container metadata
+  containerId     String?
+  agentPort       Int?
+  status          AgentStatus   @default(IDLE)
+  
+  // AI Configuration
+  model           String        @default("anthropic/claude-3.5-sonnet") // OpenRouter model to use
+  
+  // Execution data
+  toolCalls       String?       // JSON array of tool calls/messages
+  filesEdited     String?       // JSON array of edited files with diffs
+  errorMessage    String?
+  
+  // Conversation history - maintains context across runs
+  conversationHistory String?   // JSON array of messages (user + assistant)
+  
+  // Queue for additional instructions while running
+  instructionQueue String?      // JSON array of queued instructions
+  
+  // User relation
+  userId          String        @db.ObjectId
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Metadata
+  startedAt       DateTime?
+  completedAt     DateTime?
+  pushedAt        DateTime?     // When changes were pushed to GitHub
+  lastMessageAt   DateTime?     // Last interaction timestamp
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}

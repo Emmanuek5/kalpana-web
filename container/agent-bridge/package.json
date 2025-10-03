@@ -9,6 +9,7 @@
   "dependencies": {
     "ws": "^8.16.0",
     "ai": "latest",
+    "redis": "latest",
     "@openrouter/ai-sdk-provider": "^latest",
     "zod": "latest"
   },

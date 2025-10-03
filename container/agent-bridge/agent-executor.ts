@@ -1,6 +1,7 @@
 import { streamText, CoreMessage, stepCountIs } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { agentTools, getEditedFiles, clearEditedFiles } from "./agent-tools";
+import { agentTools, getEditedFiles, clearEditedFiles, setFileEditCallback } from "./agent-tools";
+import { createClient } from "redis";
 
 /**
  * Agent Executor - Runs AI agent with tools inside the container
@@ -38,31 +39,140 @@ export class AgentExecutor {
 
   private apiKey: string;
   private model: string;
-  private toolCallCallback?: (toolCall: {
-    id: string;
-    name: string;
-    arguments: any;
-    timestamp: string;
-    isResult?: boolean;
-  }) => void;
+  private agentId: string;
+  private redis: ReturnType<typeof createClient> | null = null;
+  
+  // Buffers for batching DB updates
+  private conversationBuffer: CoreMessage[] = [];
+  private toolCallsBuffer: any[] = [];
+  private filesEditedBuffer: any[] = [];
 
-  constructor(apiKey: string, model: string = "anthropic/claude-3.5-sonnet") {
+  constructor(agentId: string, apiKey: string, model: string = "anthropic/claude-3.5-sonnet") {
     if (!apiKey || apiKey.trim() === "") {
       throw new Error("OpenRouter API key is required and cannot be empty");
     }
+    this.agentId = agentId;
     this.apiKey = apiKey;
     this.model = model;
-    console.log(
-      `🔑 [AgentExecutor] Initialized with API key: ${apiKey.substring(
-        0,
-        8
-      )}...`
-    );
+    console.log(`🔑 [AgentExecutor] Initialized for agent ${agentId}`);
     console.log(`🤖 [AgentExecutor] Model: ${model}`);
+    
     // Clear any previous file edits
     clearEditedFiles();
+    
+    // Initialize Redis connection
+    this.initializeRedis();
+    
+    // Set up file edit callback to publish to Redis
+    setFileEditCallback((fileEdit) => {
+      this.publishFileEdit(fileEdit);
+    });
+    
+    // Note: State updates are now handled by Socket.io server reading from Redis
+    // No need for batch timer - Socket.io will aggregate state from events
   }
 
+  /**
+   * Initialize Redis connection
+   */
+  private async initializeRedis(): Promise<void> {
+    const redisUrl = process.env.REDIS_URL || 'redis://host.docker.internal:6379';
+    
+    try {
+      this.redis = createClient({ url: redisUrl });
+      
+      this.redis.on('error', (err) => {
+        console.error('❌ Redis error:', err);
+      });
+      
+      this.redis.on('connect', () => {
+        console.log('✅ Redis connected');
+      });
+      
+      await this.redis.connect();
+    } catch (error) {
+      console.error('❌ Failed to connect to Redis:', error);
+      // Continue without Redis - events won't be published but agent can still work
+    }
+  }
+  
+  /**
+   * Publish event to Redis
+   */
+  private async publishToRedis(event: any): Promise<void> {
+    if (!this.redis || !this.redis.isOpen) {
+      console.warn('⚠️ Redis not connected, skipping event publish');
+      return;
+    }
+    
+    try {
+      // Add to Redis Stream for history
+      await this.redis.xAdd(
+        `agent:${this.agentId}:stream`,
+        '*',
+        { data: JSON.stringify(event) },
+        { TRIM: { strategy: 'MAXLEN', threshold: 1000, strategyModifier: '~' } }
+      );
+      
+      // Publish to channel for real-time
+      await this.redis.publish(
+        `agent:${this.agentId}:events`,
+        JSON.stringify(event)
+      );
+    } catch (error) {
+      console.error('❌ Failed to publish to Redis:', error);
+    }
+  }
+  
+  /**
+   * Publish file edit event
+   */
+  private async publishFileEdit(fileEdit: any): Promise<void> {
+    this.filesEditedBuffer.push(fileEdit);
+    
+    await this.publishToRedis({
+      type: 'file-edit',
+      agentId: this.agentId,
+      fileEdit,
+      timestamp: Date.now()
+    });
+  }
+  
+  /**
+   * Flush buffers to database via HTTP
+   */
+  private async flushToDatabase(): Promise<void> {
+    if (
+      this.conversationBuffer.length === 0 &&
+      this.toolCallsBuffer.length === 0 &&
+      this.filesEditedBuffer.length === 0
+    ) {
+      return;
+    }
+    
+    try {
+      // Call Next.js API to update database
+      const response = await fetch(
+        `http://host.docker.internal:3000/api/agents/${this.agentId}/state`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationHistory: this.conversationBuffer,
+            toolCalls: this.toolCallsBuffer,
+            filesEdited: this.filesEditedBuffer
+          })
+        }
+      );
+      
+      if (response.ok) {
+        console.log(`💾 Flushed state to database for agent ${this.agentId}`);
+      }
+    } catch (error) {
+      console.error('❌ Failed to flush to database:', error);
+    }
+  }
+  
   /**
    * Get current agent state with files edited
    */
@@ -78,23 +188,8 @@ export class AgentExecutor {
    */
   setConversationHistory(messages: CoreMessage[]): void {
     this.state.conversationHistory = messages;
+    this.conversationBuffer = messages;
   }
-
-  /**
-   * Set callback for tool calls
-   */
-  setToolCallCallback(
-    callback: (toolCall: {
-      id: string;
-      name: string;
-      arguments: any;
-      timestamp: string;
-      isResult?: boolean;
-    }) => void
-  ): void {
-    this.toolCallCallback = callback;
-  }
-
   /**
    * Execute a task with streaming response
    */
@@ -102,9 +197,18 @@ export class AgentExecutor {
     if (this.state.isExecuting) {
       throw new Error("Agent is already executing a task");
     }
-
+    
+    console.log(`🎯 Starting agent execution...`);
     this.state.isExecuting = true;
     this.state.lastError = undefined;
+    
+    // Publish status event: RUNNING
+    await this.publishToRedis({
+      type: 'status',
+      agentId: this.agentId,
+      status: 'RUNNING',
+      timestamp: Date.now()
+    });
 
     try {
       console.log(`🚀 [AgentExecutor] Starting execution`);
@@ -133,119 +237,157 @@ export class AgentExecutor {
         )}`
       );
 
-      // Stream AI response with tools
-      const result = streamText({
-        model: openrouter(this.model),
-        messages: this.state.conversationHistory,
-        system: this.getSystemPrompt(),
-        tools: agentTools,
-        stopWhen: stepCountIs(100),
-        onStepFinish: ({ toolCalls, toolResults, text, finishReason }) => {
-          // Track each tool call for display
-          this.state.toolCallsCount += toolCalls.length;
+      // Stream AI response with tools using fullStream for real-time events
+      console.log(`🚀 [AgentExecutor] Calling streamText API...`);
+      console.log(`   Model: ${this.model}`);
+      console.log(`   Messages: ${this.state.conversationHistory.length}`);
+      console.log(`   Tools: ${Object.keys(agentTools).length}`);
+      
+      let result;
+      try {
+        result = streamText({
+          model: openrouter(this.model),
+          messages: this.state.conversationHistory,
+          system: this.getSystemPrompt(),
+          tools: agentTools,
+          stopWhen: stepCountIs(100),
+        });
+        console.log(`✅ [AgentExecutor] streamText() returned successfully`);
+      } catch (apiError: any) {
+        console.error(`❌ [AgentExecutor] streamText() threw error:`, apiError);
+        throw apiError;
+      }
 
-          // Record and broadcast each tool call
-          for (let i = 0; i < toolCalls.length; i++) {
-            const toolCall = toolCalls[i];
+      let fullResponse = "";
+      let chunkCount = 0;
 
-            // Get the arguments from the tool call
-            // In AI SDK, the args are available directly on the toolCall
-            // Cast to any to access the args property which exists at runtime
-            const args = (toolCall as any).args || {};
+      console.log(`📡 [AgentExecutor] Starting to consume fullStream...`);
+
+      // Use fullStream to get real-time tool-call and tool-result events
+      try {
+        console.log(`🎬 [AgentExecutor] Entering fullStream loop...`);
+        for await (const chunk of result.fullStream) {
+          console.log(`📦 [AgentExecutor] Received chunk type: ${chunk.type}`);
+          // Handle tool calls (before execution)
+          if (chunk.type === 'tool-call') {
+            this.state.toolCallsCount++;
 
             const toolCallInfo = {
-              id: toolCall.toolCallId,
-              name: toolCall.toolName,
-              arguments: args,
+              id: chunk.toolCallId,
+              name: chunk.toolName,
+              arguments: (chunk as any).input || {},
               timestamp: new Date().toISOString(),
             };
 
             this.state.toolCalls.push(toolCallInfo);
 
             console.log(
-              `🔧 [AgentExecutor] Tool call ${i + 1}/${toolCalls.length}: ${
-                toolCall.toolName
-              }`,
+              `🔧 [AgentExecutor] Tool call: ${chunk.toolName}`,
               `\n   Arguments:`,
-              JSON.stringify(args, null, 2)
+              JSON.stringify((chunk as any).input || {}, null, 2)
             );
 
-            // Notify callback if set
-            if (this.toolCallCallback) {
-              this.toolCallCallback(toolCallInfo);
-            }
-          }
-
-          // Emit tool results
-          for (let i = 0; i < toolResults.length; i++) {
-            const toolResult = toolResults[i] as any;
+            // Add to buffer
+            this.toolCallsBuffer.push({
+              ...toolCallInfo,
+              state: 'executing'
+            });
             
-            // The result is directly on the toolResult object, not nested
-            const result = toolResult.result || toolResult;
+            // Publish to Redis immediately (matches workspace agent pattern)
+            await this.publishToRedis({
+              type: 'tool-call',
+              agentId: this.agentId,
+              toolCallId: chunk.toolCallId,
+              toolName: chunk.toolName,
+              args: (chunk as any).input || {},
+              timestamp: Date.now()
+            });
+          }
+          
+          // Handle tool results (after execution)
+          else if (chunk.type === 'tool-result') {
+            const output = (chunk as any).output || {};
             
             console.log(
-              `📤 [AgentExecutor] Tool result ${i + 1}/${toolResults.length}: ${
-                toolResult.toolName
-              }`,
+              `📤 [AgentExecutor] Tool result: ${chunk.toolName}`,
               `\n   Result:`,
-              JSON.stringify(result, null, 2)
+              JSON.stringify(output, null, 2)
             );
 
-            // Notify callback with tool result
-            if (this.toolCallCallback) {
-              this.toolCallCallback({
-                id: toolResult.toolCallId,
-                name: toolResult.toolName,
-                arguments: result, // Send result directly, not wrapped
-                timestamp: new Date().toISOString(),
-                isResult: true, // Flag to identify this as a result
-              });
+            // Update buffer
+            const toolCall = this.toolCallsBuffer.find(tc => tc.id === chunk.toolCallId);
+            if (toolCall) {
+              toolCall.state = 'complete';
+              toolCall.result = output;
+              toolCall.completedAt = new Date().toISOString();
             }
+            
+            // Publish to Redis (matches workspace agent pattern)
+            await this.publishToRedis({
+              type: 'tool-result',
+              agentId: this.agentId,
+              toolCallId: chunk.toolCallId,
+              toolName: chunk.toolName,
+              result: output,
+              timestamp: Date.now()
+            });
           }
-
-          console.log(
-            `🔧 [AgentExecutor] Step completed: ${toolCalls.length} tool calls, ${toolResults.length} results, text length: ${text.length}, finishReason: ${finishReason}`
-          );
-        },
-      });
-
-      let fullResponse = "";
-      let chunkCount = 0;
-
-      console.log(`📡 [AgentExecutor] Starting to consume textStream...`);
-
-      // Stream text chunks with error handling
-      try {
-        for await (const chunk of result.textStream) {
-          fullResponse += chunk;
-          chunkCount++;
-          console.log(
-            `📨 [AgentExecutor] Chunk ${chunkCount}: ${chunk.substring(
-              0,
-              50
-            )}...`
-          );
-          yield chunk;
+          
+          // Handle text deltas
+          else if (chunk.type === 'text-delta') {
+            const text = (chunk as any).text || "";
+            
+            // Skip empty text deltas
+            if (!text || text.length === 0) {
+              console.log(`⚠️ [AgentExecutor] Skipping empty text-delta`);
+              continue;
+            }
+            
+            fullResponse += text;
+            chunkCount++;
+            
+            console.log(`💬 [AgentExecutor] Text delta (chunk ${chunkCount}): "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
+            
+            // Publish to Redis (matches workspace agent pattern)
+            await this.publishToRedis({
+              type: 'text-delta',
+              agentId: this.agentId,
+              textDelta: text,
+              timestamp: Date.now()
+            });
+            
+            console.log(`📤 [AgentExecutor] Published text-delta to Redis`);
+            
+            yield text;
+          }
         }
       } catch (streamError: any) {
-        console.error(`❌ [AgentExecutor] Stream error:`, streamError);
+        console.error(`❌ [AgentExecutor] Stream error caught:`, streamError);
+        console.error(`   Error type: ${streamError.constructor.name}`);
+        console.error(`   Error message: ${streamError.message}`);
+        console.error(`   Status code: ${streamError.statusCode || 'none'}`);
+        console.error(`   Error stack:`, streamError.stack);
+        
+        if (streamError.cause) {
+          console.error(`   Cause:`, streamError.cause);
+        }
+        
+        if (streamError.response) {
+          console.error(`   Response:`, streamError.response);
+        }
 
         // Check for specific HTTP error codes
         if (streamError.statusCode === 401) {
           throw new Error(
             `Authentication failed: Invalid or expired OpenRouter API key (401 Unauthorized). Please check your API key in settings.`
           );
-        } else if (streamError.statusCode === 403) {
-          throw new Error(
-            `Access forbidden: Your API key doesn't have permission to use this model (403 Forbidden).`
-          );
         } else if (streamError.statusCode === 429) {
           throw new Error(
-            `Rate limit exceeded: Too many requests to OpenRouter API (429 Too Many Requests). Please try again later.`
+            `Rate limit exceeded (429 Too Many Requests). Please wait a moment and try again.`
           );
-        } else if (streamError.statusCode === 404) {
+        } else if (streamError.statusCode === 500) {
           throw new Error(
-            `Model not found: The model "${this.model}" doesn't exist on OpenRouter (404 Not Found).`
+            `OpenRouter server error (500 Internal Server Error). The service may be temporarily unavailable.`
           );
         } else if (streamError.statusCode) {
           throw new Error(
@@ -255,10 +397,12 @@ export class AgentExecutor {
           );
         }
 
-        throw new Error(`Stream error: ${streamError.message}`);
+        throw new Error(`Stream error: ${streamError.message || 'Unknown stream error'}`);
       }
 
+      console.log(`🏁 [AgentExecutor] Exited fullStream loop`);
       console.log(`📝 [AgentExecutor] Streamed ${chunkCount} text chunks`);
+      console.log(`📊 [AgentExecutor] Full response length: ${fullResponse.length} chars`);
 
       // Wait for completion
       console.log(`⏳ [AgentExecutor] Waiting for completion...`);
@@ -296,6 +440,24 @@ export class AgentExecutor {
         role: "assistant",
         content: responseText,
       });
+      
+      // Update buffer
+      this.conversationBuffer = [...this.state.conversationHistory];
+      
+      // Publish completion event
+      await this.publishToRedis({
+        type: 'finish',
+        agentId: this.agentId,
+        timestamp: Date.now()
+      });
+      
+      // Publish status event: COMPLETED
+      await this.publishToRedis({
+        type: 'status',
+        agentId: this.agentId,
+        status: 'COMPLETED',
+        timestamp: Date.now()
+      });
 
       // If we got a response via completionText but not via streaming, warn about it
       if (!fullResponse && completionText) {
@@ -311,6 +473,23 @@ export class AgentExecutor {
         console.error(`   Cause:`, error.cause);
       }
       this.state.lastError = error.message;
+      
+      // Publish error event
+      await this.publishToRedis({
+        type: 'error',
+        agentId: this.agentId,
+        error: error.message,
+        timestamp: Date.now()
+      });
+      
+      // Publish status event: FAILED
+      await this.publishToRedis({
+        type: 'status',
+        agentId: this.agentId,
+        status: 'FAILED',
+        timestamp: Date.now()
+      });
+      
       throw error;
     } finally {
       this.state.isExecuting = false;
@@ -385,9 +564,16 @@ This helps users follow your reasoning and understand your progress.
   - Returns test output and errors
 
 ### Command Execution
-- **run_command**: Execute shell commands (npm, bun, git, python, etc.)
-  - Use for: building, linting, custom scripts
+- **run_command**: Execute shell commands in VS Code terminal and get output
+  - Returns output directly for quick commands (<5s)
+  - For long-running commands: returns terminalId to fetch output later
+  - Set waitForOutput=false for commands that take a long time
+  - Use for: building, linting, custom scripts, running servers
   - Whitelisted commands only for security
+- **get_terminal_output**: Fetch output from a running/completed terminal command
+  - Use the terminalId returned from run_command
+  - Check if command is still running with isRunning field
+  - Useful for monitoring long-running processes
 
 ## Working Strategy
 

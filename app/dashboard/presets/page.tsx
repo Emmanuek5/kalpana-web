@@ -27,6 +27,7 @@ import {
   Loader2,
   AlertCircle,
 } from "lucide-react";
+import { NotificationBell } from "@/components/workspace/notification-bell";
 
 interface Preset {
   id: string;
@@ -268,16 +269,19 @@ export default function PresetsPage() {
                 {presets.length}
               </Badge>
             </div>
-            <Button
-              onClick={() => {
-                resetForm();
-                setShowDialog(true);
-              }}
-              className="bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20"
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              New Preset
-            </Button>
+            <div className="flex items-center gap-3">
+              <NotificationBell />
+              <Button
+                onClick={() => {
+                  resetForm();
+                  setShowDialog(true);
+                }}
+                className="bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                New Preset
+              </Button>
+            </div>
           </div>
         </div>
 

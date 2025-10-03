@@ -3,66 +3,72 @@ import { z } from "zod";
 import { createTwoFilesPatch } from "diff";
 
 /**
- * Code Editing Agent - Specialized agent for making code changes
- * Uses AI SDK v5 structured object generation
- * Pattern follows web-research-agent.ts and sub-agent-tools.ts
+ * Code Editing Agent - Simplified single-shot editing
+ * Pattern follows sub-agent-tools.ts for better reliability
  */
 
-// Define the schema for editing actions the agent can take
-const editActionSchema = z.union([
-  z.object({
-    action: z.literal("analyzeCode"),
-    file: z.string(),
-    focus: z.string().describe("What aspect to analyze"),
-  }),
-  z.object({
-    action: z.literal("planEdit"),
-    file: z.string(),
-    changes: z.array(z.string()).describe("List of changes to make"),
-  }),
-  z.object({
-    action: z.literal("applyEdit"),
-    file: z.string(),
-    newContent: z
-      .string()
-      .describe(
-        "Complete new file content with proper formatting. Use actual newlines, not escaped \\n characters."
-      ),
-    summary: z.string().describe("What was changed"),
-  }),
-  z.object({
-    action: z.literal("validateEdit"),
-    file: z.string(),
-    checks: z.array(z.string()).describe("What to validate"),
-  }),
-  z.object({
-    action: z.literal("finishEditing"),
-    summary: z.string().describe("Summary of all changes made"),
-  }),
-]);
+const CODE_EDITING_SYSTEM_PROMPT = `You are a specialized code editing agent. Your purpose is to make precise, high-quality code changes based on instructions.
 
-type EditAction = z.infer<typeof editActionSchema>;
+## Core Responsibilities
+- Write clean, well-structured, and maintainable code
+- Follow language-specific conventions and best practices
+- Implement the exact functionality requested in the instruction
+- Preserve existing code structure when modifying files
+- Add appropriate comments and documentation
+- Ensure code is production-ready and error-free
 
-/**
- * Helper function to unescape content that may have literal \n, \t, etc.
- * LLMs sometimes generate code with escaped characters instead of actual newlines
- */
-function unescapeContent(content: string): string {
-  return content
-    .replace(/\\n/g, "\n")
-    .replace(/\\t/g, "\t")
-    .replace(/\\r/g, "\r")
-    .replace(/\\"/g, '"')
-    .replace(/\\'/g, "'")
-    .replace(/\\\\/g, "\\");
-}
+## Editing Guidelines
+- **For new files**: Create complete, functional code from scratch
+- **For existing files**: Make precise modifications while preserving the existing structure
+- **Always preserve**: Imports, existing functions/classes that aren't being modified
+- **Code quality**: Use proper indentation, naming conventions, and organize code logically
+- **Error handling**: Include appropriate error handling where needed
+- **Dependencies**: Only use dependencies that are available or commonly installed
+
+## Output Requirements
+- Return the COMPLETE file content (not just changes)
+- Provide a clear summary of what was implemented or modified
+- If the instruction is unclear or impossible, explain why in the summary
+- Ensure the output is immediately usable without further editing
+- **CRITICAL**: You MUST return valid JSON with the following structure:
+  {
+    "content": "the complete file content as a string",
+    "summary": "description of changes",
+    "success": true,
+    "warnings": []
+  }
+- The "content" field must contain the raw file content as a properly escaped JSON string
+- DO NOT include markdown code blocks (no \`\`\`), return the content as a plain string value
+- All newlines in content must be actual newlines (\\n), not literal newline characters
+- All quotes in content must be properly escaped
+
+## Language-Specific Rules
+- **JavaScript/TypeScript**: Use modern ES6+ syntax, proper typing for TS
+- **Python**: Follow PEP 8 conventions, use type hints where appropriate
+- **JSON**: Ensure valid JSON structure with proper formatting
+- **Configuration files**: Maintain proper format and structure
+
+## IMPORTANT
+When returning the file content, do NOT wrap it in markdown code blocks like \`\`\`javascript or \`\`\`typescript.
+Return the raw code directly as a string. The content field should contain ONLY the file content, not any markdown formatting.`;
+
+const FileEditSchema = z.object({
+  content: z.string().describe("The complete file content"),
+  summary: z
+    .string()
+    .describe("A clear summary of what was implemented or modified"),
+  success: z.boolean().describe("Whether the task was completed successfully"),
+  warnings: z
+    .array(z.string())
+    .optional()
+    .describe("Any warnings or concerns about the implementation"),
+});
 
 export interface CodeEditTask {
   instruction: string;
   files: Array<{ path: string; content: string }>;
   context?: string;
   model: any; // Required: Language model from main agent (uses user's API key)
-  maxSteps?: number;
 }
 
 export interface CodeEditResult {
@@ -73,42 +79,17 @@ export interface CodeEditResult {
     originalContent: string;
     newContent: string;
     changesSummary: string;
+    linesAdded: number;
+    linesRemoved: number;
   }>;
   diffs: string[];
-  testSuggestions?: string[];
-  history: Array<{ action: EditAction; result: any }>;
+  warnings?: string[];
 }
-
-const CODE_EDITING_SYSTEM_PROMPT = `You are a specialized code editing agent. Your purpose is to make precise, high-quality code changes based on instructions.
-
-## Core Responsibilities
-- Analyze code to understand what needs changing
-- Plan edits carefully before applying them
-- Write clean, well-structured, and maintainable code
-- Follow language-specific conventions and best practices
-- Preserve existing code structure when modifying files
-- Validate changes to ensure correctness
-
-## Editing Process
-1. **analyzeCode**: Understand the current code and what needs to change
-2. **planEdit**: Outline the specific changes you'll make
-3. **applyEdit**: Make the actual changes with complete new file content
-4. **validateEdit**: Check your work for correctness
-5. **finishEditing**: Complete the task with a summary
-
-## Output Requirements
-- When using applyEdit, provide COMPLETE file content (not just changes)
-- Use actual newlines in code, not escaped \\n characters
-- Ensure code is properly formatted and indented
-- Preserve imports and code not being modified
-- Include appropriate error handling
-
-You must follow the editing process systematically and complete all requested changes.`;
 
 export async function executeCodeEdit(
   task: CodeEditTask
 ): Promise<CodeEditResult> {
-  const { instruction, files, context, model, maxSteps = 10 } = task;
+  const { instruction, files, context, model } = task;
 
   // Model must be provided from the main agent to use user's API key
   if (!model) {
@@ -116,260 +97,167 @@ export async function executeCodeEdit(
   }
 
   const edits: CodeEditResult["edits"] = [];
-  const history: CodeEditResult["history"] = [];
-  let scratchpad = "";
+  const diffs: string[] = [];
+  const allWarnings: string[] = [];
 
   try {
-    // Create file map for easy access
-    const fileMap = new Map(files.map((f) => [f.path, f.content]));
+    // Process each file
+    for (const file of files) {
+      const fileType = getFileType(file.path);
+      
+      // Prepare the prompt
+      const prompt = `File: ${file.path} (${fileType})
 
-    for (let step = 0; step < maxSteps; step++) {
-      // Decide next action using the provided model
-      const action = await decideNextEditAction(
-        model,
-        instruction,
-        files,
-        context,
-        history,
-        scratchpad,
-        edits
-      );
+Existing content:
+\`\`\`
+${file.content}
+\`\`\`
 
-      // Execute the action
-      const result = await executeEditAction(action, fileMap, edits);
-      history.push({ action, result });
+Instruction: ${instruction}
 
-      // Update scratchpad
-      if (action.action === "analyzeCode") {
-        scratchpad += `\nAnalysis of ${action.file}: ${result.analysis || ""}`;
-      } else if (action.action === "planEdit") {
-        scratchpad += `\nPlan for ${action.file}: ${action.changes.join(", ")}`;
+${context ? `Additional context: ${context}` : ""}
+
+Please modify the file according to the instruction. Return the complete modified file content and a summary of changes.`;
+
+      // Generate the edited content with better error handling
+      let result;
+      try {
+        result = await generateObject({
+          model,
+          system: CODE_EDITING_SYSTEM_PROMPT,
+          prompt,
+          schema: FileEditSchema,
+          schemaName: "FileEdit",
+          schemaDescription: "The edited file content and summary",
+          mode: "json", // Force JSON mode for better reliability
+        });
+      } catch (parseError: any) {
+        // If JSON parsing fails, it might be because the model returned raw code
+        console.error(`JSON parse error for ${file.path}:`, parseError.message);
+        allWarnings.push(`Failed to parse response for ${file.path}: ${parseError.message}`);
+        continue; // Skip this file
       }
 
-      // Check for completion
-      if (action.action === "finishEditing") {
-        // Generate diffs for all edits
-        const diffs = edits.map((edit) =>
-          createTwoFilesPatch(
-            edit.file,
-            edit.file,
-            edit.originalContent,
-            edit.newContent,
-            "before",
-            "after"
-          )
+      if (result.object && result.object.success) {
+        // Sanitize the content to remove any markdown formatting
+        let newContent = sanitizeCodeContent(result.object.content);
+        
+        const oldLines = file.content.split("\n");
+        const newLines = newContent.split("\n");
+        
+        const linesAdded = Math.max(0, newLines.length - oldLines.length);
+        const linesRemoved = Math.max(0, oldLines.length - newLines.length);
+
+        // Create diff
+        const diff = createTwoFilesPatch(
+          file.path,
+          file.path,
+          file.content,
+          newContent,
+          "before",
+          "after"
         );
 
-        return {
-          success: true,
-          explanation: action.summary,
-          edits,
-          diffs,
-          history,
-        };
+        edits.push({
+          file: file.path,
+          originalContent: file.content,
+          newContent,
+          changesSummary: result.object.summary,
+          linesAdded,
+          linesRemoved,
+        });
+
+        diffs.push(diff);
+
+        if (result.object.warnings && result.object.warnings.length > 0) {
+          allWarnings.push(...result.object.warnings);
+        }
+      } else {
+        // Partial failure - include in warnings
+        allWarnings.push(`Failed to edit ${file.path}: ${result.object.summary}`);
       }
     }
 
-    // Max steps reached
-    const diffs = edits.map((edit) =>
-      createTwoFilesPatch(
-        edit.file,
-        edit.file,
-        edit.originalContent,
-        edit.newContent,
-        "before",
-        "after"
-      )
-    );
+    // Generate overall explanation
+    const explanation = edits.length > 0
+      ? `Successfully edited ${edits.length} file(s):\n${edits
+          .map(
+            (e) =>
+              `- ${e.file}: ${e.changesSummary} (+${e.linesAdded} -${e.linesRemoved})`
+          )
+          .join("\n")}`
+      : "No files were successfully edited";
 
     return {
-      success: false,
-      explanation: "Max steps reached before completing edits",
+      success: edits.length > 0,
+      explanation,
       edits,
       diffs,
-      history,
+      warnings: allWarnings.length > 0 ? allWarnings : undefined,
     };
   } catch (error: any) {
     console.error("Code editing agent error:", error);
     return {
       success: false,
       explanation: `Failed to generate code edits: ${error.message}`,
-      edits,
+      edits: [],
       diffs: [],
-      history,
+      warnings: [error.message],
     };
-  }
-}
-
-async function decideNextEditAction(
-  model: any, // Model from main agent with user's API key
-  instruction: string,
-  files: Array<{ path: string; content: string }>,
-  context: string | undefined,
-  history: CodeEditResult["history"],
-  scratchpad: string,
-  edits: CodeEditResult["edits"]
-): Promise<EditAction> {
-  const recentHistory = history.slice(-5);
-
-  const prompt = `You are a code editing agent. Your task is to: ${instruction}
-
-${context ? `Context: ${context}\n` : ""}
-
-Files to edit:
-${files
-  .map(
-    (f) => `
---- ${f.path} ---
-${f.content.slice(0, 2000)}${f.content.length > 2000 ? "\n... (truncated)" : ""}
-`
-  )
-  .join("\n")}
-
-Scratchpad (your notes):
-${scratchpad || "(empty)"}
-
-Edits made so far (${edits.length}):
-${edits.map((e) => `- ${e.file}: ${e.changesSummary}`).join("\n") || "(none)"}
-
-Recent actions:
-${recentHistory.map((h) => `- ${h.action.action}`).join("\n") || "(none)"}
-
-Guidelines:
-1. First analyzeCode to understand what needs changing
-2. planEdit to outline the changes
-3. applyEdit to make the actual changes (provide COMPLETE new file content with ACTUAL newlines, not escaped \\n)
-4. validateEdit to check your work
-5. finishEditing when all changes are complete
-
-IMPORTANT: When using applyEdit, the newContent must be properly formatted code with real line breaks.
-Do NOT use escaped newlines (\\n) - use actual newlines in the string.
-
-Return the next single action to take.`;
-
-  try {
-    const { object: action } = await generateObject({
-      model,
-      system: CODE_EDITING_SYSTEM_PROMPT,
-      schema: editActionSchema,
-      schemaName: "EditAction",
-      schemaDescription: "The next editing action to take on the codebase",
-      prompt,
-    });
-
-    return action;
-  } catch (error: any) {
-    console.error("Code editing agent - generateObject error:", error);
-    console.error("Error details:", error.message);
-    
-    // Log additional error info if available
-    if (error.text) {
-      console.error("Model response text:", error.text);
-    }
-    if (error.response) {
-      console.error("Model response object:", JSON.stringify(error.response, null, 2));
-    }
-
-    // Fallback: If structured generation fails, finish editing
-    return {
-      action: "finishEditing",
-      summary: `Unable to complete code editing due to parsing error: ${error.message}. Edits completed so far: ${edits.map(e => e.file).join(", ") || "none"}`,
-    };
-  }
-}
-
-async function executeEditAction(
-  action: EditAction,
-  fileMap: Map<string, string>,
-  edits: CodeEditResult["edits"]
-): Promise<any> {
-  switch (action.action) {
-    case "analyzeCode": {
-      const content = fileMap.get(action.file);
-      return {
-        success: true,
-        analysis: `Analyzing ${action.file} for: ${action.focus}`,
-      };
-    }
-
-    case "planEdit": {
-      return {
-        success: true,
-        plan: action.changes,
-      };
-    }
-
-    case "applyEdit": {
-      const originalContent = fileMap.get(action.file) || "";
-
-      // Unescape content in case LLM generated literal \n instead of newlines
-      const unescapedContent = unescapeContent(action.newContent);
-
-      // Check if this file was already edited
-      const existingEditIndex = edits.findIndex((e) => e.file === action.file);
-
-      if (existingEditIndex >= 0) {
-        // Update existing edit
-        edits[existingEditIndex] = {
-          file: action.file,
-          originalContent,
-          newContent: unescapedContent,
-          changesSummary: action.summary,
-        };
-      } else {
-        // Add new edit
-        edits.push({
-          file: action.file,
-          originalContent,
-          newContent: unescapedContent,
-          changesSummary: action.summary,
-        });
-      }
-
-      // Update file map for subsequent edits
-      fileMap.set(action.file, unescapedContent);
-
-      return {
-        success: true,
-        file: action.file,
-        summary: action.summary,
-      };
-    }
-
-    case "validateEdit": {
-      return {
-        success: true,
-        validation: "Edit validated",
-        checks: action.checks,
-      };
-    }
-
-    case "finishEditing": {
-      return {
-        success: true,
-        summary: action.summary,
-      };
-    }
-
-    default:
-      return { success: false, error: "Unknown action" };
   }
 }
 
 /**
- * Helper: Create a diff for a single edit
+ * Sanitize content by stripping markdown code blocks and other formatting
+ * This ensures we get clean code even if the model doesn't follow instructions perfectly
  */
-export function createEditDiff(
-  filePath: string,
-  originalContent: string,
-  newContent: string
-): string {
-  return createTwoFilesPatch(
-    filePath,
-    filePath,
-    originalContent,
-    newContent,
-    "before",
-    "after"
-  );
+function sanitizeCodeContent(content: string): string {
+  let cleaned = content;
+  
+  // Remove markdown code fences with language specifier (```typescript ... ```)
+  const fullBlockMatch = cleaned.match(/^```[\w]*\n([\s\S]*?)\n```$/);
+  if (fullBlockMatch) {
+    cleaned = fullBlockMatch[1];
+  }
+  
+  // Remove opening fence if present
+  cleaned = cleaned.replace(/^```[\w]*\n/, '');
+  
+  // Remove closing fence if present
+  cleaned = cleaned.replace(/\n```$/, '');
+  
+  // Remove single backticks around the entire content
+  if (cleaned.startsWith('`') && cleaned.endsWith('`')) {
+    cleaned = cleaned.slice(1, -1);
+  }
+  
+  // Trim any excessive whitespace at start/end
+  cleaned = cleaned.trim();
+  
+  return cleaned;
+}
+
+function getFileType(filePath: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase() || "";
+  
+  const typeMap: Record<string, string> = {
+    js: "JavaScript",
+    ts: "TypeScript",
+    jsx: "React JSX",
+    tsx: "React TSX",
+    py: "Python",
+    json: "JSON",
+    md: "Markdown",
+    txt: "Text",
+    html: "HTML",
+    css: "CSS",
+    scss: "SCSS",
+    yaml: "YAML",
+    yml: "YAML",
+    xml: "XML",
+    sh: "Shell Script",
+    sql: "SQL",
+  };
+
+  return typeMap[ext] || "Unknown";
 }

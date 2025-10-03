@@ -6,6 +6,7 @@ import Docker from "dockerode";
 import path from "path";
 import fs from "fs";
 import { EventEmitter } from "events";
+import { createClient } from "redis";
 
 /**
  * Agent Runner - Manages execution of autonomous coding agents
@@ -33,7 +34,7 @@ interface EditedFile {
 }
 
 export interface AgentStreamEvent {
-  type: "text" | "tool-call" | "tool-result" | "status" | "files" | "done" | "error";
+  type: "text" | "tool-call" | "tool-result" | "status" | "files" | "done" | "error" | "message";
   agentId: string;
   data?: any;
   timestamp: string;
@@ -44,10 +45,15 @@ class AgentRunner {
   private portManager: PortManager;
   private runningAgents: Map<string, boolean> = new Map();
   private eventEmitter: EventEmitter = new EventEmitter();
+  private redis: ReturnType<typeof createClient> | null = null;
 
   // Increase max listeners to handle multiple concurrent streams
   constructor() {
     this.eventEmitter.setMaxListeners(100);
+    // Initialize Redis asynchronously (don't await in constructor)
+    this.initializeRedis().catch(err => 
+      console.error('[Agent Runner] Redis initialization failed:', err)
+    );
 
     const envHost = process.env.DOCKER_HOST;
 
@@ -120,7 +126,49 @@ class AgentRunner {
       data,
       timestamp: new Date().toISOString(),
     };
+    console.log(`[Agent Runner] Emitting event type: ${type} for agent ${agentId}`);
+    console.log(`[Agent Runner] Event listeners count:`, this.eventEmitter.listenerCount("agent-event"));
     this.eventEmitter.emit("agent-event", event);
+  }
+
+  private async initializeRedis(): Promise<void> {
+    const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+    
+    try {
+      this.redis = createClient({ url: redisUrl });
+      
+      this.redis.on('error', (err) => {
+        console.error('[Agent Runner] Redis error:', err);
+      });
+      
+      await this.redis.connect();
+      console.log('[Agent Runner] ✅ Redis connected');
+    } catch (error) {
+      console.error('[Agent Runner] ❌ Failed to connect to Redis:', error);
+      // Continue without Redis - agent will still work but no real-time events
+    }
+  }
+
+  private async publishStatusToRedis(agentId: string, status: string): Promise<void> {
+    if (!this.redis) return;
+    
+    try {
+      const event = {
+        type: 'status',
+        agentId,
+        status,
+        timestamp: Date.now()
+      };
+      
+      await this.redis.publish(
+        `agent:${agentId}:events`,
+        JSON.stringify(event)
+      );
+      
+      console.log(`[Agent Runner] 📡 Published status ${status} for agent ${agentId}`);
+    } catch (error) {
+      console.error('[Agent Runner] Failed to publish status to Redis:', error);
+    }
   }
 
   private getDefaultDockerClient(): Docker {
@@ -142,6 +190,26 @@ class AgentRunner {
     this.runningAgents.set(agentId, true);
 
     try {
+      // Update status to show we're setting up infrastructure
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { 
+          status: 'CLONING',
+          errorMessage: null
+        }
+      });
+      
+      // Publish status to Redis for real-time updates
+      await this.publishStatusToRedis(agentId, 'CLONING');
+      
+      // Ensure Redis is running (creates container if needed)
+      await dockerManager.ensureRedis();
+      console.log('✅ Redis ensured for agent', agentId);
+      
+      // Ensure Socket.io container is running
+      await dockerManager.ensureSocketIO();
+      console.log('✅ Socket.io ensured for agent', agentId);
+      
       const agent = await prisma.agent.findUnique({
         where: { id: agentId },
       });
@@ -174,6 +242,9 @@ class AgentRunner {
           conversationHistory: JSON.stringify(conversationHistory),
         },
       });
+      
+      // Publish status to Redis for real-time updates
+      await this.publishStatusToRedis(agentId, 'CLONING');
 
       // Allocate port for agent communication (single port)
       // This checks BOTH database AND OS-level availability
@@ -252,6 +323,7 @@ class AgentRunner {
         throw new Error("Failed to create container after retries");
       }
 
+      // Update status to RUNNING now that container is ready
       await prisma.agent.update({
         where: { id: agentId },
         data: {
@@ -260,10 +332,13 @@ class AgentRunner {
         },
       });
 
+      console.log(`🚀 Agent ${agentId} status updated to RUNNING`);
+
       // Emit status change event
       this.emitAgentEvent(agentId, "status", { status: "RUNNING" });
 
       // Execute agent task with context (streams to database and real-time)
+      console.log(`🤖 Starting agent task execution for ${agentId}`);
       await this.executeAgentTask(
         agentId,
         containerId,
@@ -277,19 +352,29 @@ class AgentRunner {
     } catch (error: any) {
       console.error(`Agent ${agentId} error:`, error);
 
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: {
-          status: "ERROR",
-          errorMessage: error.message,
-        },
-      });
+      // Try to update agent status, but don't fail if agent was deleted
+      try {
+        await prisma.agent.update({
+          where: { id: agentId },
+          data: {
+            status: "ERROR",
+            errorMessage: error.message,
+          },
+        });
+        console.log(`✅ Updated agent ${agentId} status to ERROR`);
+      } catch (updateError: any) {
+        console.warn(`⚠️ Could not update agent ${agentId} status (may have been deleted):`, updateError.message);
+      }
 
       // Emit error event
       this.emitAgentEvent(agentId, "error", { error: error.message });
 
       // Release the allocated port
-      await this.portManager.releaseAgentPort(agentId);
+      try {
+        await this.portManager.releaseAgentPort(agentId);
+      } catch (portError: any) {
+        console.warn(`⚠️ Could not release port for agent ${agentId}:`, portError.message);
+      }
 
       this.runningAgents.delete(agentId);
     }
@@ -428,6 +513,7 @@ class AgentRunner {
       `OPENROUTER_API_KEY=${openrouterApiKey}`,
       `AGENT_MODEL=${model}`,
       `AGENT_MODE=true`,
+      `REDIS_URL=redis://host.docker.internal:6379`,
     ];
 
     // Add git user info if available
@@ -655,9 +741,15 @@ class AgentRunner {
       }
 
       // Stream the response
-      let fullResponse = "";
-      const toolCallsCollected: any[] = [];
-      const reader = response.body?.getReader();
+        let fullResponse = "";
+        const toolCallsCollected: any[] = [];
+        const toolResultsCollected: any[] = [];
+        const filesEditedCollected: any[] = [];
+        
+        // Track assistant message parts (like workspace agent)
+        const assistantParts: any[] = [];
+        
+        const reader = response.body?.getReader();
       const decoder = new TextDecoder();
 
       if (!reader) {
@@ -695,15 +787,10 @@ class AgentRunner {
               if (data.type === "text") {
                 fullResponse += data.content;
 
-                // Emit text chunk in real-time
+                // Emit text chunk in real-time for streaming display
                 this.emitAgentEvent(agentId, "text", { content: data.content });
 
-                // Don't log every tiny chunk, just show we're receiving
-                if (fullResponse.length % 500 === 0) {
-                  console.log(
-                    `📝 Agent streaming... (${fullResponse.length} chars so far)`
-                  );
-                }
+             
 
                 // Save incrementally every 2 seconds while streaming
                 const now = Date.now();
@@ -731,25 +818,34 @@ class AgentRunner {
                   });
                 }
               } else if (data.type === "tool-call") {
-                // Collect tool call information for display
-                const toolCall = {
-                  id: data.toolCallId || Date.now().toString(),
+                // Add tool call as a message part (like workspace agent)
+                const toolCallPart = {
+                  type: "tool-call",
+                  toolCallId: data.toolCallId,
+                  toolName: data.toolName,
+                  args: data.args,
+                };
+                
+                assistantParts.push(toolCallPart);
+                
+                // Add to toolCallsCollected with proper format for Activity tab
+                toolCallsCollected.push({
+                  id: data.toolCallId,
                   type: "function",
                   function: {
                     name: data.toolName,
                     arguments: JSON.stringify(data.args || {}),
                   },
                   timestamp: new Date().toISOString(),
-                };
-
-                toolCallsCollected.push(toolCall);
+                  state: "executing" as const,
+                  toolName: data.toolName, // Also include flat for easier access
+                  args: data.args,
+                });
+                
                 console.log(`🔧 Tool called: ${data.toolName}`);
                 console.log(`   Arguments:`, data.args);
-
-                // Emit tool call event in real-time
-                this.emitAgentEvent(agentId, "tool-call", { toolCall });
-
-                // Save tool calls immediately
+                
+                // Save to database immediately so Activity tab shows in real-time
                 await prisma.agent.update({
                   where: { id: agentId },
                   data: {
@@ -757,8 +853,53 @@ class AgentRunner {
                     lastMessageAt: new Date(),
                   },
                 });
+
+                // Emit tool call event in real-time
+                this.emitAgentEvent(agentId, "tool-call", { 
+                  toolCallId: data.toolCallId,
+                  toolName: data.toolName,
+                  args: data.args,
+                });
               } else if (data.type === "tool-result") {
-                // Log tool result
+                // Add tool result as a message part
+                const toolResultPart = {
+                  type: "tool-result",
+                  toolCallId: data.toolCallId,
+                  toolName: data.toolName,
+                  result: data.result,
+                };
+                
+                assistantParts.push(toolResultPart);
+                
+                // Update the corresponding tool call with result and mark as complete
+                console.log(`🔍 Looking for tool call with ID: ${data.toolCallId}`);
+                console.log(`🔍 Current toolCallsCollected:`, JSON.stringify(toolCallsCollected.map(tc => ({ id: tc.id, toolName: (tc as any).toolName }))));
+                
+                const toolCall = toolCallsCollected.find(
+                  tc => tc.id === data.toolCallId || (tc as any).toolCallId === data.toolCallId
+                );
+                
+                if (toolCall) {
+                  (toolCall as any).state = "complete";
+                  (toolCall as any).result = data.result;
+                  (toolCall as any).completedAt = new Date().toISOString();
+                  console.log(`✅ Tool ${data.toolName} marked complete in toolCallsCollected`);
+                
+                  
+                  // Save to database immediately so Activity tab shows completion
+                  await prisma.agent.update({
+                    where: { id: agentId },
+                    data: {
+                      toolCalls: JSON.stringify(toolCallsCollected),
+                      lastMessageAt: new Date(),
+                    },
+                  });
+                  console.log(`✅ Saved updated toolCallsCollected to database (${toolCallsCollected.length} calls)`);
+                } else {
+                  console.error(`⚠️ Tool call ${data.toolCallId} NOT FOUND in toolCallsCollected!`);
+                  console.error(`⚠️ Available IDs:`, toolCallsCollected.map(tc => tc.id));
+                }
+                
                 console.log(`📤 Tool result: ${data.toolName}`);
                 console.log(`   Result:`, data.result);
 
@@ -768,6 +909,41 @@ class AgentRunner {
                   toolName: data.toolName,
                   result: data.result,
                 });
+              } else if (data.type === "file-edit") {
+                // Track file edits in real-time
+                console.log(`📝 [Agent Runner] ✅ Received file-edit event:`, JSON.stringify(data.fileEdit));
+                
+                // Ensure file edit has all required fields
+                const fileEdit = {
+                  path: data.fileEdit.path,
+                  operation: data.fileEdit.operation,
+                  timestamp: data.fileEdit.timestamp || new Date().toISOString(),
+                  diff: data.fileEdit.diff || null,
+                  newContent: data.fileEdit.newContent || null,
+                  oldContent: data.fileEdit.oldContent || null,
+                };
+                
+                filesEditedCollected.push(fileEdit);
+                
+                console.log(`📝 [Agent Runner] File edited: ${fileEdit.path} (${fileEdit.operation})`);
+                console.log(`📝 [Agent Runner] Total files edited: ${filesEditedCollected.length}`);
+                console.log(`📝 [Agent Runner] Files array:`, JSON.stringify(filesEditedCollected.map(f => ({ path: f.path, op: f.operation }))));
+                
+                // Save files to database immediately
+                await prisma.agent.update({
+                  where: { id: agentId },
+                  data: {
+                    filesEdited: JSON.stringify(filesEditedCollected),
+                    lastMessageAt: new Date(),
+                  },
+                });
+                console.log(`📝 [Agent Runner] ✅ Saved ${filesEditedCollected.length} files to database`);
+                
+                // Emit file edit event
+                this.emitAgentEvent(agentId, "files", {
+                  files: filesEditedCollected,
+                });
+                console.log(`📝 [Agent Runner] ✅ Emitted 'files' event with ${filesEditedCollected.length} files`);
               } else if (data.type === "done") {
                 console.log(`✅ Agent task completed`);
                 console.log(
@@ -785,14 +961,30 @@ class AgentRunner {
                   `   Tool calls: ${data.state?.toolCallsCount || 0}`
                 );
 
-                // Add final assistant response to conversation history if we have content
+                // Build final assistant message with all parts (text + tool calls/results)
+                // Remove temporary streaming messages
+                conversationHistory = conversationHistory.filter(
+                  msg => !(msg as any).streaming
+                );
+                
+                // Add text part if there's any content
                 if (fullResponse && fullResponse.trim()) {
-                  conversationHistory.push({
-                    role: "assistant",
-                    content: fullResponse,
-                    timestamp: new Date().toISOString(),
-                  });
+                  assistantParts.unshift({ type: "text", text: fullResponse });
                 }
+                
+                // Create final assistant message with parts (like workspace agent)
+                const finalMessage = {
+                  role: "assistant",
+                  content: JSON.stringify(assistantParts),
+                  timestamp: new Date().toISOString(),
+                };
+                
+                conversationHistory.push(finalMessage);
+                
+                // Emit the complete message
+                this.emitAgentEvent(agentId, "message", {
+                  message: finalMessage,
+                });
 
                 // Emit files edited event
                 if (data.state?.filesEdited?.length > 0) {
@@ -806,7 +998,7 @@ class AgentRunner {
                   where: { id: agentId },
                   data: {
                     conversationHistory: JSON.stringify(conversationHistory),
-                    filesEdited: JSON.stringify(data.state?.filesEdited || []),
+                    filesEdited: JSON.stringify(filesEditedCollected),
                     toolCalls: JSON.stringify(toolCallsCollected),
                     status: "COMPLETED",
                     completedAt: new Date(),
@@ -814,10 +1006,10 @@ class AgentRunner {
                   },
                 });
 
-                // Emit done event in real-time (don't send large objects)
+                // Emit done event in real-time (minimal data only)
                 this.emitAgentEvent(agentId, "done", {
                   status: "COMPLETED",
-                  filesEditedCount: data.state?.filesEdited?.length || 0,
+                  filesEditedCount: filesEditedCollected.length,
                   toolCallsCount: toolCallsCollected.length,
                 });
                 

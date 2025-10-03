@@ -780,6 +780,302 @@ export class DockerManager {
       console.error("monitorWorkspaceReadiness failure:", error);
     }
   }
+
+  /**
+   * Ensure Redis container is running for agent communication
+   */
+  async ensureRedis(): Promise<{ port: number; containerId: string }> {
+    const containerName = 'kalpana-redis';
+    const redisPort = 6379;
+    
+    try {
+      // Check if Redis container already exists
+      const container = this.docker.getContainer(containerName);
+      const info = await container.inspect();
+      
+      if (info.State.Running) {
+        console.log('✅ Redis container already running');
+        return { 
+          port: redisPort, 
+          containerId: info.Id 
+        };
+      }
+      
+      // Start if stopped
+      await container.start();
+      console.log('✅ Started existing Redis container');
+      return { port: redisPort, containerId: info.Id };
+      
+    } catch (error: any) {
+      if (error.statusCode === 404) {
+        // Container doesn't exist, create it
+        console.log('📦 Creating Redis container...');
+        
+        // Pull Redis image if not present
+        try {
+          console.log('📥 Pulling redis:7-alpine image...');
+          await new Promise<void>((resolve, reject) => {
+            this.docker.pull('redis:7-alpine', (err: any, stream: any) => {
+              if (err) return reject(err);
+              this.docker.modem.followProgress(
+                stream,
+                (err: any) => (err ? reject(err) : resolve()),
+                (event: any) => {
+                  if (event.status) {
+                    process.stdout.write(`\r${event.status}${event.progress || ''}`);
+                  }
+                }
+              );
+            });
+          });
+          console.log('\n✅ Redis image pulled successfully');
+        } catch (pullError: any) {
+          console.log('⚠️ Redis image pull failed, checking if already present...');
+          // Check if image exists
+          const images = await this.docker.listImages({ filters: { reference: ['redis:7-alpine'] } });
+          if (images.length === 0) {
+            throw new Error('Redis image not available and pull failed');
+          }
+          console.log('✅ Redis image already present');
+        }
+        
+        const container = await this.docker.createContainer({
+          Image: 'redis:7-alpine',
+          name: containerName,
+          ExposedPorts: {
+            '6379/tcp': {}
+          },
+          HostConfig: {
+            PortBindings: {
+              '6379/tcp': [{ HostPort: redisPort.toString() }]
+            },
+            RestartPolicy: {
+              Name: 'unless-stopped'
+            },
+            AutoRemove: false
+          },
+          Labels: {
+            'kalpana.managed': 'true',
+            'kalpana.service': 'redis'
+          }
+        });
+        
+        await container.start();
+        console.log('✅ Redis container created and started');
+        
+        // Wait for Redis to be ready
+        await this.waitForRedis(redisPort);
+        
+        return { port: redisPort, containerId: container.id };
+      }
+      
+      throw error;
+    }
+  }
+
+  /**
+   * Wait for Redis to be ready
+   */
+  private async waitForRedis(port: number, maxAttempts = 30): Promise<void> {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        // Try to connect using native net module
+        const net = await import('net');
+        await new Promise<void>((resolve, reject) => {
+          const socket = net.connect(port, 'localhost', () => {
+            socket.end();
+            resolve();
+          });
+          socket.on('error', reject);
+          socket.setTimeout(1000);
+        });
+        
+        console.log('✅ Redis is ready');
+        return;
+      } catch (error) {
+        if (i < maxAttempts - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+    
+    throw new Error('Redis failed to start within timeout');
+  }
+
+  /**
+   * Stop Redis container
+   */
+  async stopRedis(): Promise<void> {
+    try {
+      const container = this.docker.getContainer('kalpana-redis');
+      await container.stop();
+      console.log('🛑 Redis container stopped');
+    } catch (error: any) {
+      if (error.statusCode !== 404) {
+        console.error('Error stopping Redis:', error);
+      }
+    }
+  }
+
+  /**
+   * Ensure Socket.io container is running
+   */
+  async ensureSocketIO(): Promise<{ port: number; containerId: string }> {
+    const containerName = 'kalpana-socketio';
+    const socketioPort = 3002;
+    
+    try {
+      // Check if Socket.io container already exists
+      const container = this.docker.getContainer(containerName);
+      const info = await container.inspect();
+      
+      if (info.State.Running) {
+        console.log('✅ Socket.io container already running');
+        return { 
+          port: socketioPort, 
+          containerId: info.Id 
+        };
+      }
+      
+      // Start if stopped
+      await container.start();
+      console.log('✅ Started existing Socket.io container');
+      return { port: socketioPort, containerId: info.Id };
+      
+    } catch (error: any) {
+      if (error.statusCode === 404) {
+        // Container doesn't exist, create it
+        console.log('📦 Creating Socket.io container...');
+        
+        // Build image from Dockerfile
+        const contextPath = path.resolve(process.cwd(), 'lib/docker/containers/socketio');
+        
+        if (!fs.existsSync(path.join(contextPath, 'Dockerfile'))) {
+          throw new Error(`Socket.io Dockerfile not found at ${contextPath}`);
+        }
+        
+        // Copy Prisma schema to socketio directory for Docker build
+        const prismaSchemaPath = path.resolve(process.cwd(), 'prisma/schema.prisma');
+        const targetSchemaPath = path.join(contextPath, 'schema.prisma');
+        
+        if (fs.existsSync(prismaSchemaPath)) {
+          fs.copyFileSync(prismaSchemaPath, targetSchemaPath);
+          console.log('✅ Copied Prisma schema to Socket.io build context');
+        } else {
+          console.warn('⚠️ Prisma schema not found, Socket.io may not have database access');
+        }
+        
+        // Build image
+        const tar = await import('tar-fs');
+        const fsTar = tar.pack(contextPath);
+        
+        await new Promise<void>((resolve, reject) => {
+          this.docker.buildImage(
+            fsTar as unknown as NodeJS.ReadableStream,
+            { t: 'kalpana/socketio:latest' },
+            (err, stream) => {
+              if (err || !stream) return reject(err);
+              this.docker.modem.followProgress(
+                stream,
+                (buildErr: any) => (buildErr ? reject(buildErr) : resolve()),
+                (event: any) => {
+                  if (event.stream) {
+                    process.stdout.write(event.stream);
+                  }
+                }
+              );
+            }
+          );
+        });
+        
+        console.log('✅ Socket.io image built');
+        
+        // Get Redis URL
+        const redisInfo = await this.ensureRedis();
+        
+        // Create container
+        const container = await this.docker.createContainer({
+          Image: 'kalpana/socketio:latest',
+          name: containerName,
+          Env: [
+            `PORT=${socketioPort}`,
+            `REDIS_URL=redis://host.docker.internal:${redisInfo.port}`,
+            `DATABASE_URL=${process.env.DATABASE_URL}`,
+            `CORS_ORIGIN=${process.env.NEXT_PUBLIC_URL || 'http://localhost:3000'}`
+          ],
+          ExposedPorts: {
+            [`${socketioPort}/tcp`]: {}
+          },
+          HostConfig: {
+            PortBindings: {
+              [`${socketioPort}/tcp`]: [{ HostPort: socketioPort.toString() }]
+            },
+            RestartPolicy: {
+              Name: 'unless-stopped'
+            },
+            AutoRemove: false
+          },
+          Labels: {
+            'kalpana.managed': 'true',
+            'kalpana.service': 'socketio'
+          }
+        });
+        
+        await container.start();
+        console.log('✅ Socket.io container created and started');
+        
+        // Wait for Socket.io to be ready
+        await this.waitForSocketIO(socketioPort);
+        
+        return { port: socketioPort, containerId: container.id };
+      }
+      
+      throw error;
+    }
+  }
+
+  /**
+   * Wait for Socket.io to be ready
+   */
+  private async waitForSocketIO(port: number, maxAttempts = 30): Promise<void> {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const net = await import('net');
+        await new Promise<void>((resolve, reject) => {
+          const socket = net.connect(port, 'localhost', () => {
+            socket.end();
+            resolve();
+          });
+          socket.on('error', reject);
+          socket.setTimeout(1000);
+        });
+        
+        console.log('✅ Socket.io is ready');
+        return;
+      } catch (error) {
+        if (i < maxAttempts - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+    
+    throw new Error('Socket.io failed to start within timeout');
+  }
+
+  /**
+   * Stop Socket.io container
+   */
+  async stopSocketIO(): Promise<void> {
+    try {
+      const container = this.docker.getContainer('kalpana-socketio');
+      await container.stop();
+      console.log('🛑 Socket.io container stopped');
+    } catch (error: any) {
+      if (error.statusCode !== 404) {
+        console.error('Error stopping Socket.io:', error);
+      }
+    }
+  }
 }
 
 // Singleton instance

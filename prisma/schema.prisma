@@ -31,6 +31,7 @@ model User {
   domains             Domain[]
   agents              Agent[]
   deployments         Deployment[]
+  notifications       Notification[]
   
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
@@ -399,5 +400,39 @@ model Agent {
   
   @@index([userId])
   @@index([status])
+  @@index([createdAt])
+}
+
+enum NotificationType {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+model Notification {
+  id              String            @id @default(auto()) @map("_id") @db.ObjectId
+  userId          String            @db.ObjectId
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  type            NotificationType  @default(INFO)
+  title           String
+  message         String
+  read            Boolean           @default(false)
+  
+  // Optional action button
+  actionLabel     String?
+  actionUrl       String?
+  
+  // Metadata
+  workspaceId     String?           @db.ObjectId // Optional link to workspace
+  agentId         String?           @db.ObjectId // Optional link to agent
+  deploymentId    String?           @db.ObjectId // Optional link to deployment
+  
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  @@index([userId])
+  @@index([read])
   @@index([createdAt])
 }

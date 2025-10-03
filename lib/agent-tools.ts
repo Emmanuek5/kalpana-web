@@ -106,50 +106,24 @@ export function createAgentTools(
           .describe("Starting line number (1-indexed)"),
         endLine: z
           .number()
-          .describe("Ending line number (1-indexed)"),
+          .describe("Ending line number (1-indexed, inclusive)"),
       }),
       execute: async ({ path, startLine, endLine }) => {
         try {
           const content = await containerAPI.readFile(workspaceId, path);
-          const lines = content.split('\n');
-          
-          // Validate line numbers
-          if (startLine < 1 || endLine < 1) {
-            return { 
-              success: false, 
-              error: "Line numbers must be >= 1", 
-              path 
-            };
-          }
-          
-          if (startLine > endLine) {
-            return { 
-              success: false, 
-              error: "Start line must be <= end line", 
-              path 
-            };
-          }
-          
-          // Extract the requested lines (convert to 0-indexed)
-          const selectedLines = lines.slice(startLine - 1, endLine);
-          const selectedContent = selectedLines.join('\n');
-          
+          const lines = content.split("\n");
+          const start = startLine - 1;
+          const selectedLines = lines.slice(start, endLine);
+          const selectedContent = selectedLines.join("\n");
           return { 
             success: true, 
-            content: selectedContent,
-            path,
-            startLine,
-            endLine,
-            totalLines: lines.length,
+            content: selectedContent, 
+            path, 
+            linesSelected: selectedLines.length,
+            totalLines: lines.length 
           };
         } catch (error: any) {
-          return { 
-            success: false, 
-            error: error.message, 
-            path,
-            startLine,
-            endLine,
-          };
+          return { success: false, error: error.message, path };
         }
       },
     }),
@@ -201,27 +175,56 @@ export function createAgentTools(
           .describe(
             "The shell command to execute (e.g., 'npm install', 'python app.py')"
           ),
+        terminalName: z
+          .string()
+          .optional()
+          .describe("Optional custom terminal name"),
       }),
-      execute: async ({ command }) => {
+      execute: async ({ command, terminalName }) => {
+        const terminalLabel = terminalName || "Kalpana Agent";
         try {
-          const result = await containerAPI.runCommand(workspaceId, command);
+          const result = await containerAPI.runInTerminal(
+            workspaceId,
+            command,
+            terminalLabel
+          );
           return {
             success: true,
-            stdout: result.stdout,
-            stderr: result.stderr,
             command,
+            terminal: result?.terminal || terminalLabel,
+            message:
+              result?.message ||
+              `Command \"${command}\" sent to terminal \"${terminalLabel}\"`,
           };
-        } catch (error: any) {
-          return { success: false, error: error.message, command };
+        } catch (terminalError: any) {
+          // Fallback to direct execution if terminal not available
+          try {
+            const result = await containerAPI.runCommand(workspaceId, command);
+            return {
+              success: true,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              command,
+              terminalFallback: true,
+              message:
+                terminalError?.message ||
+                "Terminal unavailable, executed command directly inside container",
+            };
+          } catch (error: any) {
+            return {
+              success: false,
+              error: error.message,
+              command,
+            };
+          }
         }
       },
     }),
 
     searchCode: tool({
-      description:
-        "Search for text/code patterns in the workspace using ripgrep",
+      description: "Search for code across files in the workspace",
       inputSchema: z.object({
-        query: z.string().describe("The text or regex pattern to search for"),
+        query: z.string().describe("The search query for code"),
       }),
       execute: async ({ query }) => {
         try {
@@ -368,16 +371,11 @@ export function createAgentTools(
           .describe(
             "What to research (e.g., 'Find React hooks best practices')"
           ),
-        urls: z
-          .array(z.string())
-          .optional()
-          .describe("Specific URLs to visit and analyze"),
       }),
-      execute: async ({ task, urls }) => {
+      execute: async ({ task }) => {
         try {
           const result = await runWebResearchAgent({
             task,
-            startUrl: urls && urls[0],
             maxSteps: 20,
             performanceMode: "balanced",
             model: agentModel,
@@ -396,7 +394,7 @@ export function createAgentTools(
 
     editCode: tool({
       description:
-        "Use a specialized code editing agent to make precise changes to files. Returns diffs showing changes.",
+        "Use a specialized code editing agent to make precise changes to files. Automatically writes the edited files to disk.",
       inputSchema: z.object({
         instruction: z
           .string()
@@ -424,123 +422,35 @@ export function createAgentTools(
             context,
             model: agentModel,
           });
+          
+          // Write the edited files to disk
+          if (result.success && result.edits.length > 0) {
+            for (const edit of result.edits) {
+              try {
+                await containerAPI.writeFile(workspaceId, edit.file, edit.newContent);
+                console.log(`✅ [editCode] Wrote edited file: ${edit.file}`);
+              } catch (writeError: any) {
+                console.error(`❌ [editCode] Failed to write ${edit.file}:`, writeError.message);
+                // Add warning but don't fail the entire operation
+                if (!result.warnings) result.warnings = [];
+                result.warnings.push(`Failed to write ${edit.file}: ${writeError.message}`);
+              }
+            }
+          }
+          
           return result;
         } catch (error: any) {
           return {
             success: false,
-            explanation: `Code editing failed: ${error.message}`,
+            error: error.message,
+            explanation: "Code editing failed",
             edits: [],
             diffs: [],
+            warnings: [error.message],
           };
         }
       },
     }),
-
-    getConsoleLogs: tool({
-      description:
-        "Get console logs and errors from the workspace environment. Useful for debugging runtime issues.",
-      inputSchema: z.object({
-        level: z
-          .enum(["log", "error", "warn", "info"])
-          .optional()
-          .describe("Filter by log level (default: all)"),
-        limit: z
-          .number()
-          .optional()
-          .describe("Max number of logs to return (default: 50)"),
-      }),
-      execute: async ({ level, limit = 50 }) => {
-        try {
-          const logs = await containerAPI.getConsoleLogs(workspaceId, {
-            level,
-            limit,
-          });
-          return {
-            success: true,
-            logs,
-            count: logs.length,
-          };
-        } catch (error: any) {
-          return {
-            success: false,
-            error: error.message,
-            logs: [],
-          };
-        }
-      },
-    }),
-
-    getLintErrors: tool({
-      description:
-        "Get linting errors for files in the workspace. Helps identify code quality issues.",
-      inputSchema: z.object({
-        path: z
-          .string()
-          .optional()
-          .describe("Specific file or directory to check (default: all)"),
-      }),
-      execute: async ({ path }) => {
-        try {
-          const errors = await containerAPI.getLintErrors(workspaceId, path);
-          return {
-            success: true,
-            errors,
-            count: errors.length,
-          };
-        } catch (error: any) {
-          return {
-            success: false,
-            error: error.message,
-            errors: [],
-          };
-        }
-      },
-    }),
-
-    getProblems: tool({
-      description:
-        "Get ALL problems/diagnostics from VS Code - includes TypeScript errors, linting issues, and all language server diagnostics. This shows EXACTLY what the user sees in VS Code's Problems tab. Use this to understand what errors/warnings exist in the code.",
-      inputSchema: z.object({
-        severity: z
-          .enum(["error", "warning", "info", "hint"])
-          .optional()
-          .describe(
-            "Filter by severity: 'error' for errors only, 'warning' for warnings, etc. Leave empty for all problems."
-          ),
-      }),
-      execute: async ({ severity }) => {
-        try {
-          const result = await containerAPI.getVSCodeProblems(
-            workspaceId,
-            severity
-          );
-
-          if (result.count === 0) {
-            return {
-              success: true,
-              message: "No problems found! Code looks clean.",
-              count: 0,
-              problems: [],
-            };
-          }
-
-          return {
-            success: true,
-            count: result.count,
-            timestamp: result.timestamp,
-            problems: result.diagnostics,
-            summary: `Found ${result.count} ${severity || "total"} problem(s)`,
-          };
-        } catch (error: any) {
-          return {
-            success: false,
-            error: error.message,
-            note: "Make sure VS Code extension is installed and active",
-          };
-        }
-      },
-    }),
-
     // ========== VS Code Extension Tools ==========
     runInTerminal: tool({
       description:
@@ -1099,6 +1009,125 @@ export function createAgentTools(
             output: error.stdout || "",
             errors: error.stderr || "",
           };
+        }
+      },
+    }),
+
+    // ========== Advanced Search and Inspection Tools ==========
+    grepInFile: tool({
+      description: "Search for a pattern within a specific file using grep. Returns matching lines with line numbers.",
+      inputSchema: z.object({
+        path: z.string().describe("File path to search in"),
+        pattern: z.string().describe("Pattern to search for (supports regex)"),
+        caseInsensitive: z.boolean().optional().describe("Case-insensitive search (default: false)"),
+        contextLines: z.number().optional().describe("Number of context lines before/after match (default: 0)"),
+      }),
+      execute: async ({ path, pattern, caseInsensitive, contextLines }) => {
+        try {
+          const result = await containerAPI.grepInFile(workspaceId, path, pattern, caseInsensitive, contextLines);
+          return result;
+        } catch (error: any) {
+          return { success: false, error: error.message, matches: [], count: 0 };
+        }
+      },
+    }),
+
+    grepInDirectory: tool({
+      description: "Search for a pattern recursively in all files within a directory. Returns matching files and lines.",
+      inputSchema: z.object({
+        path: z.string().optional().describe("Directory path to search in (default: workspace root)"),
+        pattern: z.string().describe("Pattern to search for (supports regex)"),
+        filePattern: z.string().optional().describe("File pattern to filter (e.g., '*.ts', '*.js')"),
+        caseInsensitive: z.boolean().optional().describe("Case-insensitive search (default: false)"),
+        maxResults: z.number().optional().describe("Maximum number of matches to return (default: 100)"),
+      }),
+      execute: async ({ path, pattern, filePattern, caseInsensitive, maxResults }) => {
+        try {
+          const result = await containerAPI.grepInDirectory(workspaceId, path, pattern, filePattern, caseInsensitive, maxResults);
+          return result;
+        } catch (error: any) {
+          return { success: false, error: error.message, matches: [], count: 0 };
+        }
+      },
+    }),
+
+    countLines: tool({
+      description: "Count lines in a file or all files in a directory. Useful for understanding code size.",
+      inputSchema: z.object({
+        path: z.string().describe("File or directory path"),
+        filePattern: z.string().optional().describe("File pattern to filter (e.g., '*.ts')"),
+      }),
+      execute: async ({ path, filePattern }) => {
+        try {
+          const result = await containerAPI.countLines(workspaceId, path, filePattern);
+          return result;
+        } catch (error: any) {
+          return { success: false, error: error.message };
+        }
+      },
+    }),
+
+    fileDiff: tool({
+      description: "Compare two files and show the differences using diff command.",
+      inputSchema: z.object({
+        file1: z.string().describe("First file path"),
+        file2: z.string().describe("Second file path"),
+        unified: z.boolean().optional().describe("Use unified diff format (default: true)"),
+      }),
+      execute: async ({ file1, file2, unified }) => {
+        try {
+          const result = await containerAPI.fileDiff(workspaceId, file1, file2, unified);
+          return result;
+        } catch (error: any) {
+          return { success: false, error: error.message };
+        }
+      },
+    }),
+
+    headFile: tool({
+      description: "Read the first N lines of a file. Useful for quickly inspecting file headers.",
+      inputSchema: z.object({
+        path: z.string().describe("File path"),
+        lines: z.number().optional().describe("Number of lines to read (default: 10)"),
+      }),
+      execute: async ({ path, lines }) => {
+        try {
+          const result = await containerAPI.headFile(workspaceId, path, lines);
+          return result;
+        } catch (error: any) {
+          return { success: false, error: error.message };
+        }
+      },
+    }),
+
+    tailFile: tool({
+      description: "Read the last N lines of a file. Useful for checking logs or file endings.",
+      inputSchema: z.object({
+        path: z.string().describe("File path"),
+        lines: z.number().optional().describe("Number of lines to read (default: 10)"),
+      }),
+      execute: async ({ path, lines }) => {
+        try {
+          const result = await containerAPI.tailFile(workspaceId, path, lines);
+          return result;
+        } catch (error: any) {
+          return { success: false, error: error.message };
+        }
+      },
+    }),
+
+    findDuplicates: tool({
+      description: "Find duplicate files in a directory based on content hash (MD5).",
+      inputSchema: z.object({
+        path: z.string().optional().describe("Directory path to search (default: workspace root)"),
+        filePattern: z.string().optional().describe("File pattern to filter (e.g., '*.ts')"),
+      }),
+      execute: async ({ path, filePattern }) => {
+        try {
+          const result = await containerAPI.findDuplicates(workspaceId, path, filePattern);
+          return result;
+        } catch (error: any) {
+          return { success: false, error: error.message, duplicates: [], duplicateCount: 0 };
         }
       },
     }),

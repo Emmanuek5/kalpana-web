@@ -11,7 +11,7 @@ const execAsync = promisify(exec);
 const WORKSPACE_ROOT = "/workspace";
 const PORT = 3001; // Agent bridge server port
 const VSCODE_EXTENSION_PORT = 3002; // VS Code extension server port
-
+const IS_AGENT_MODE = process.env.AGENT_MODE;
 // Agent executor instance (initialized when agent starts)
 let agentExecutor: AgentExecutor | null = null;
 
@@ -80,7 +80,9 @@ function connectToVSCodeExtension() {
     vscodeWsReady = false;
     vscodeWs = null;
     // Retry connection after 2 seconds
+   if (!IS_AGENT_MODE) {
     setTimeout(connectToVSCodeExtension, 2000);
+   }
   });
 
   vscodeWs.on("error", (error) => {
@@ -141,13 +143,22 @@ interface Command {
     | "watchFile"
     | "getVSCodeProblems"
     | "runInTerminal"
+    | "runInTerminalAndCapture"
+    | "getTerminalOutput"
     | "getCodeActions"
     | "applyCodeAction"
     | "goToDefinition"
     | "findReferences"
     | "searchSymbols"
     | "formatDocument"
-    | "getHover";
+    | "getHover"
+    | "grepInFile"
+    | "grepInDirectory"
+    | "countLines"
+    | "fileDiff"
+    | "headFile"
+    | "tailFile"
+    | "findDuplicates";
   payload: any;
 }
 
@@ -207,6 +218,25 @@ wss.on("connection", (ws: WebSocket) => {
   console.log("✅ New agent connection established");
   clients.add(ws);
 
+  // Set up ping/pong heartbeat to keep connection alive
+  let isAlive = true;
+  
+  ws.on('pong', () => {
+    isAlive = true;
+  });
+
+  const heartbeatInterval = setInterval(() => {
+    if (!isAlive) {
+      console.log("💔 Client didn't respond to ping, terminating connection");
+      clearInterval(heartbeatInterval);
+      ws.terminate();
+      return;
+    }
+    
+    isAlive = false;
+    ws.ping();
+  }, 30000); // Ping every 30 seconds
+
   ws.on("message", async (data: Buffer) => {
     try {
       const command: Command = JSON.parse(data.toString());
@@ -227,11 +257,13 @@ wss.on("connection", (ws: WebSocket) => {
 
   ws.on("close", () => {
     console.log("🔌 Agent connection closed");
+    clearInterval(heartbeatInterval);
     clients.delete(ws);
   });
 
   ws.on("error", (error) => {
     console.error("❌ WebSocket error:", error);
+    clearInterval(heartbeatInterval);
   });
 
   // Send welcome message
@@ -657,6 +689,38 @@ async function handleCommand(command: Command): Promise<Response> {
         }
       }
 
+      case "runInTerminalAndCapture": {
+        console.log(
+          `🖥️  Running command in VS Code terminal with capture: ${command.payload.command}`
+        );
+        try {
+          const data = await sendToVSCodeExtension({
+            id: command.id,
+            type: "runInTerminalAndCapture",
+            payload: command.payload,
+          });
+          return { id: command.id, success: true, data };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
+      case "getTerminalOutput": {
+        console.log(
+          `📋 Getting terminal output for: ${command.payload.terminalId}`
+        );
+        try {
+          const data = await sendToVSCodeExtension({
+            id: command.id,
+            type: "getTerminalOutput",
+            payload: command.payload,
+          });
+          return { id: command.id, success: true, data };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
       case "getCodeActions": {
         console.log(
           `🔧 Getting code actions for ${command.payload.filePath}:${command.payload.line}`
@@ -763,6 +827,293 @@ async function handleCommand(command: Command): Promise<Response> {
         }
       }
 
+      // ========== Advanced Search and Inspection Tools ==========
+      case "grepInFile": {
+        const { path, pattern, caseInsensitive, contextLines } = command.payload;
+        const filePath = sanitizePath(path);
+        console.log(`🔍 Grep in file: ${pattern} in ${filePath}`);
+
+        try {
+          if (!existsSync(filePath)) {
+            return { id: command.id, success: false, error: "File not found" };
+          }
+
+          const caseFlag = caseInsensitive ? "-i" : "";
+          const contextFlag = contextLines > 0 ? `-C ${contextLines}` : "";
+          
+          const { stdout } = await execAsync(
+            `grep -n ${caseFlag} ${contextFlag} "${pattern}" "${filePath}" || true`,
+            {
+              cwd: WORKSPACE_ROOT,
+              maxBuffer: 1024 * 1024 * 5,
+            }
+          );
+
+          const matches = stdout
+            .split("\n")
+            .filter((line) => line.trim())
+            .map((line) => {
+              const colonIndex = line.indexOf(":");
+              if (colonIndex > 0) {
+                const lineNum = line.substring(0, colonIndex);
+                const content = line.substring(colonIndex + 1);
+                return { line: parseInt(lineNum), content };
+              }
+              return { line: 0, content: line };
+            });
+
+          return {
+            id: command.id,
+            success: true,
+            data: { path, pattern, matches, count: matches.length },
+          };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
+      case "grepInDirectory": {
+        const { path: dirPath, pattern, filePattern, caseInsensitive, maxResults = 100 } = command.payload;
+        const fullPath = sanitizePath(dirPath || ".");
+        console.log(`🔍 Grep in directory: ${pattern} in ${fullPath}`);
+
+        try {
+          if (!existsSync(fullPath)) {
+            return { id: command.id, success: false, error: "Directory not found" };
+          }
+
+          const caseFlag = caseInsensitive ? "-i" : "";
+          const includeFlag = filePattern ? `--include="${filePattern}"` : "";
+          
+          const { stdout } = await execAsync(
+            `grep -rn ${caseFlag} ${includeFlag} "${pattern}" "${fullPath}" 2>/dev/null | head -n ${maxResults} || true`,
+            {
+              cwd: WORKSPACE_ROOT,
+              maxBuffer: 1024 * 1024 * 5,
+            }
+          );
+
+          const matches = stdout
+            .split("\n")
+            .filter((line) => line.trim())
+            .map((line) => {
+              const parts = line.split(":");
+              if (parts.length >= 3) {
+                const file = parts[0].replace(fullPath + "/", "");
+                const lineNum = parseInt(parts[1]);
+                const content = parts.slice(2).join(":");
+                return { file, line: lineNum, content };
+              }
+              return null;
+            })
+            .filter((m) => m !== null);
+
+          return {
+            id: command.id,
+            success: true,
+            data: { path: dirPath, pattern, matches, count: matches.length },
+          };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
+      case "countLines": {
+        const { path: targetPath, filePattern } = command.payload;
+        const fullPath = sanitizePath(targetPath);
+        console.log(`📊 Count lines: ${fullPath}`);
+
+        try {
+          if (!existsSync(fullPath)) {
+            return { id: command.id, success: false, error: "Path not found" };
+          }
+
+          const stats = await execAsync(`stat -c '%F' "${fullPath}"`);
+          const isDirectory = stats.stdout.trim().includes("directory");
+
+          if (isDirectory) {
+            const findPattern = filePattern ? `-name "${filePattern}"` : "-type f";
+            const { stdout } = await execAsync(
+              `find "${fullPath}" ${findPattern} -exec wc -l {} + 2>/dev/null || echo "0"`,
+              {
+                cwd: WORKSPACE_ROOT,
+                maxBuffer: 1024 * 1024 * 5,
+              }
+            );
+
+            const lines = stdout.split("\n").filter((l) => l.trim());
+            const files = lines.slice(0, -1).map((line) => {
+              const parts = line.trim().split(/\s+/);
+              const count = parseInt(parts[0]);
+              const file = parts.slice(1).join(" ").replace(fullPath + "/", "");
+              return { file, lines: count };
+            });
+
+            const total = files.reduce((sum, f) => sum + f.lines, 0);
+
+            return {
+              id: command.id,
+              success: true,
+              data: {
+                path: targetPath,
+                isDirectory: true,
+                files,
+                totalFiles: files.length,
+                totalLines: total,
+              },
+            };
+          } else {
+            const { stdout } = await execAsync(`wc -l "${fullPath}"`);
+            const lines = parseInt(stdout.trim().split(/\s+/)[0]) || 0;
+
+            return {
+              id: command.id,
+              success: true,
+              data: { path: targetPath, isDirectory: false, lines },
+            };
+          }
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
+      case "fileDiff": {
+        const { file1, file2, unified = true } = command.payload;
+        const fullPath1 = sanitizePath(file1);
+        const fullPath2 = sanitizePath(file2);
+        console.log(`🔄 File diff: ${file1} vs ${file2}`);
+
+        try {
+          if (!existsSync(fullPath1)) {
+            return { id: command.id, success: false, error: `File not found: ${file1}` };
+          }
+          if (!existsSync(fullPath2)) {
+            return { id: command.id, success: false, error: `File not found: ${file2}` };
+          }
+
+          const diffFlag = unified ? "-u" : "";
+          const { stdout } = await execAsync(
+            `diff ${diffFlag} "${fullPath1}" "${fullPath2}" || true`,
+            {
+              cwd: WORKSPACE_ROOT,
+              maxBuffer: 1024 * 1024 * 5,
+            }
+          );
+
+          return {
+            id: command.id,
+            success: true,
+            data: { file1, file2, diff: stdout, hasDifferences: stdout.length > 0 },
+          };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
+      case "headFile": {
+        const { path: filePath, lines = 10 } = command.payload;
+        const fullPath = sanitizePath(filePath);
+        console.log(`📄 Head file: ${fullPath} (${lines} lines)`);
+
+        try {
+          if (!existsSync(fullPath)) {
+            return { id: command.id, success: false, error: "File not found" };
+          }
+
+          const { stdout } = await execAsync(`head -n ${lines} "${fullPath}"`, {
+            cwd: WORKSPACE_ROOT,
+            maxBuffer: 1024 * 1024 * 5,
+          });
+
+          return {
+            id: command.id,
+            success: true,
+            data: { path: filePath, lines, content: stdout },
+          };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
+      case "tailFile": {
+        const { path: filePath, lines = 10 } = command.payload;
+        const fullPath = sanitizePath(filePath);
+        console.log(`📄 Tail file: ${fullPath} (${lines} lines)`);
+
+        try {
+          if (!existsSync(fullPath)) {
+            return { id: command.id, success: false, error: "File not found" };
+          }
+
+          const { stdout } = await execAsync(`tail -n ${lines} "${fullPath}"`, {
+            cwd: WORKSPACE_ROOT,
+            maxBuffer: 1024 * 1024 * 5,
+          });
+
+          return {
+            id: command.id,
+            success: true,
+            data: { path: filePath, lines, content: stdout },
+          };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
+      case "findDuplicates": {
+        const { path: dirPath, filePattern } = command.payload;
+        const fullPath = sanitizePath(dirPath || ".");
+        console.log(`🔍 Find duplicates: ${fullPath}`);
+
+        try {
+          if (!existsSync(fullPath)) {
+            return { id: command.id, success: false, error: "Directory not found" };
+          }
+
+          const findPattern = filePattern ? `-name "${filePattern}"` : "-type f";
+          const { stdout } = await execAsync(
+            `find "${fullPath}" ${findPattern} -type f -exec md5sum {} + 2>/dev/null || true`,
+            {
+              cwd: WORKSPACE_ROOT,
+              maxBuffer: 1024 * 1024 * 10,
+            }
+          );
+
+          const hashMap = new Map<string, string[]>();
+          
+          stdout.split("\n").forEach((line) => {
+            if (!line.trim()) return;
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 2) {
+              const hash = parts[0];
+              const file = parts.slice(1).join(" ").replace(fullPath + "/", "");
+              
+              if (!hashMap.has(hash)) {
+                hashMap.set(hash, []);
+              }
+              hashMap.get(hash)!.push(file);
+            }
+          });
+
+          const duplicates = Array.from(hashMap.entries())
+            .filter(([_, files]) => files.length > 1)
+            .map(([hash, files]) => ({ hash, files, count: files.length }));
+
+          return {
+            id: command.id,
+            success: true,
+            data: {
+              path: dirPath,
+              duplicates,
+              duplicateCount: duplicates.length,
+              totalDuplicateFiles: duplicates.reduce((sum, d) => sum + d.count, 0),
+            },
+          };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
       default:
         return {
           id: command.id,
@@ -852,8 +1203,16 @@ const httpServer = createServer(async (req, res) => {
       console.log(`🔑 Using API key: ${effectiveApiKey.substring(0, 8)}...`);
       console.log(`🤖 Initializing agent with model: ${model}`);
 
-      // Initialize agent executor
-      agentExecutor = new AgentExecutor(effectiveApiKey, model);
+      // Get agentId from environment (set by agent-runner)
+      const agentId = process.env.AGENT_ID;
+      if (!agentId) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "AGENT_ID not found in environment" }));
+        return;
+      }
+
+      // Initialize agent executor (agentId is now first parameter)
+      agentExecutor = new AgentExecutor(agentId, effectiveApiKey, model);
 
       // Set conversation history if provided (for resume)
       if (conversationHistory && Array.isArray(conversationHistory)) {
@@ -867,83 +1226,40 @@ const httpServer = createServer(async (req, res) => {
         `▶️ Starting agent execution for task: ${task.substring(0, 100)}...`
       );
 
-      // Stream response using Server-Sent Events
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      });
-
-      // Set up tool call callback to stream tool calls and results
-      agentExecutor.setToolCallCallback((toolCall: any) => {
-        // Check if this is a tool result (has isResult flag)
-        if (toolCall.isResult) {
-          console.log(`📤 [Server] Tool result: ${toolCall.name}`);
-          console.log(`   Result:`, JSON.stringify(toolCall.arguments, null, 2));
-          res.write(
-            `data: ${JSON.stringify({
-              type: "tool-result",
-              toolName: toolCall.name,
-              toolCallId: toolCall.id,
-              result: toolCall.arguments,
-            })}\n\n`
-          );
-        } else {
-          console.log(`🔧 [Server] Tool call: ${toolCall.name}`);
-          console.log(`   Arguments:`, JSON.stringify(toolCall.arguments, null, 2));
-          res.write(
-            `data: ${JSON.stringify({
-              type: "tool-call",
-              toolName: toolCall.name,
-              toolCallId: toolCall.id,
-              args: toolCall.arguments,
-            })}\n\n`
-          );
-        }
-      });
-
-      console.log(`🎯 [Server] Starting to stream agent execution response...`);
-
+      // Execute agent task - events are published to Redis automatically
+      console.log(`🎯 Starting agent execution...`);
+      
       try {
+        // Execute the task (it's an async generator, must iterate through it)
+        console.log(`🔄 Consuming execute() generator...`);
         let chunkCount = 0;
-        console.log(`📡 [Server] Entering for-await loop...`);
-
         for await (const chunk of agentExecutor.execute(task)) {
           chunkCount++;
-          console.log(
-            `📨 [Server] Received chunk ${chunkCount} from agent: ${chunk.substring(
-              0,
-              50
-            )}...`
-          );
-          res.write(
-            `data: ${JSON.stringify({ type: "text", content: chunk })}\n\n`
-          );
-          console.log(`✅ [Server] Chunk ${chunkCount} written to response`);
+          console.log(`📦 [Server] Received chunk ${chunkCount}: "${chunk.substring(0, 50)}${chunk.length > 50 ? '...' : ''}"`);
+          // Chunks are already published to Redis by the executor
         }
-
-        console.log(
-          `🏁 [Server] For-await loop completed with ${chunkCount} chunks`
-        );
-
+        console.log(`✅ [Server] Generator completed, received ${chunkCount} chunks`);
+        
         const state = agentExecutor.getState();
         console.log(`✅ Agent execution completed:`, {
-          chunksStreamed: chunkCount,
           toolCalls: state.toolCallsCount,
           filesEdited: state.filesEdited.length,
         });
 
-        res.write(`data: ${JSON.stringify({ type: "done", state })}\n\n`);
-        console.log(`📤 [Server] Sent "done" message to client`);
+        // Return success response
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ 
+          success: true,
+          state: {
+            toolCallsCount: state.toolCallsCount,
+            filesEditedCount: state.filesEdited.length
+          }
+        }));
       } catch (error: any) {
         console.error(`❌ Agent execution error:`, error);
-        console.error(`❌ Error stack:`, error.stack);
-        res.write(
-          `data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`
-        );
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: error.message }));
       }
-
-      res.end();
     } catch (error: any) {
       console.error("Error in /agent/execute:", error);
       res.writeHead(500, { "Content-Type": "application/json" });

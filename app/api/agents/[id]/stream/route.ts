@@ -12,7 +12,10 @@ export async function GET(
     const session = await auth.api.getSession({ headers: req.headers });
     const { id } = await params;
 
+    console.log(`[Stream Route] 🎯 SSE connection request for agent ${id}`);
+
     if (!session) {
+      console.log(`[Stream Route] ❌ Unauthorized - no session`);
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -25,15 +28,16 @@ export async function GET(
     });
 
     if (!agent) {
+      console.log(`[Stream Route] ❌ Agent ${id} not found`);
       return new Response("Agent not found", { status: 404 });
     }
+    
+    console.log(`[Stream Route] ✅ Agent ${id} found, status: ${agent.status}`);
 
     // Set up SSE headers with real-time event streaming
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        console.log(`📡 [Stream API] Client connected for agent ${id}`);
-
         // Send initial state
         controller.enqueue(
           encoder.encode(
@@ -50,8 +54,10 @@ export async function GET(
           // Send conversation history FIRST (so messages appear before tool calls)
           if (agent.conversationHistory) {
             const conversation = JSON.parse(agent.conversationHistory);
-            if (Array.isArray(conversation)) {
-              for (const message of conversation) {
+            // Filter out temporary streaming messages
+            const cleanConversation = conversation.filter((msg: any) => !msg.streaming);
+            if (Array.isArray(cleanConversation)) {
+              for (const message of cleanConversation) {
                 controller.enqueue(
                   encoder.encode(
                     `data: ${JSON.stringify({
@@ -77,6 +83,20 @@ export async function GET(
                     })}\n\n`
                   )
                 );
+                
+                // If tool is complete, also send the result
+                if (toolCall.state === "complete" && toolCall.result) {
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "tool-result",
+                        toolCallId: toolCall.id,
+                        toolName: toolCall.function?.name || toolCall.type,
+                        result: toolCall.result,
+                      })}\n\n`
+                    )
+                  );
+                }
               }
             }
           }
@@ -99,12 +119,13 @@ export async function GET(
         }
 
         // Subscribe to real-time events from agent runner
+        console.log(`[Stream Route] 📡 Subscribing to agent ${id} events...`);
         const unsubscribe = agentRunner.subscribeToAgent(
           id,
           (event: AgentStreamEvent) => {
+            console.log(`[Stream Route] ✅ Received event:`, event.type, `for agent:`, event.agentId);
+            console.log(`[Stream Route] Event data:`, JSON.stringify(event.data).substring(0, 200));
             try {
-              console.log(`📨 [Stream API] Event for agent ${id}:`, event.type);
-
               switch (event.type) {
                 case "text":
                   // Stream text chunks in real-time
@@ -118,12 +139,27 @@ export async function GET(
                   );
                   break;
 
+                case "message":
+                  // Complete message (assistant response)
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        type: "message",
+                        message: event.data.message,
+                      })}\n\n`
+                    )
+                  );
+                  break;
+
                 case "tool-call":
+                  console.log(`[Stream Route] Forwarding tool-call:`, event.data);
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
                         type: "tool-call",
-                        toolCall: event.data.toolCall,
+                        toolCallId: event.data.toolCallId,
+                        toolName: event.data.toolName,
+                        args: event.data.args,
                       })}\n\n`
                     )
                   );
@@ -176,9 +212,7 @@ export async function GET(
                       })}\n\n`
                     )
                   );
-                  // Keep stream open for potential resume - don't close!
-                  // The client will stay connected and receive new events if agent is resumed
-                  console.log(`📡 [Stream API] Agent ${id} completed, stream remains open for resume`);
+                  // Keep stream open for potential resume
                   break;
 
                 case "error":
@@ -190,8 +224,7 @@ export async function GET(
                       })}\n\n`
                     )
                   );
-                  // Keep stream open even on error - user might want to resume/retry
-                  console.log(`📡 [Stream API] Agent ${id} errored, stream remains open for retry`);
+                  // Keep stream open even on error
                   break;
               }
             } catch (error) {
@@ -199,10 +232,12 @@ export async function GET(
             }
           }
         );
+        
+        console.log(`[Stream Route] ✅ Subscription active for agent ${id}`);
 
         // Clean up on client disconnect
         req.signal.addEventListener("abort", () => {
-          console.log(`🔌 [Stream API] Client disconnected for agent ${id}`);
+          console.log(`[Stream Route] 🔌 Client disconnected, unsubscribing from agent ${id}`);
           unsubscribe();
           controller.close();
         });

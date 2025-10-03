@@ -70,6 +70,22 @@ export async function POST(req: NextRequest) {
     let userMessageId: string | null = null;
     let assistantMessageId: string | null = null;
 
+    if (chatId) {
+      try {
+        const assistantMessage = await prisma.message.create({
+          data: {
+            chatId,
+            role: "assistant",
+            content: JSON.stringify([]),
+            status: "streaming",
+          },
+        });
+        assistantMessageId = assistantMessage.id;
+      } catch (error) {
+        console.error("Failed to create assistant message placeholder", error);
+      }
+    }
+
     // Stream AI response with tools and multi-step support
     // Transform the last message to include images if provided
     const transformedMessages = [...messages];
@@ -107,6 +123,49 @@ export async function POST(req: NextRequest) {
     const encoder = new TextEncoder();
     const abortController = new AbortController();
     
+    const persistenceStatus = { current: "streaming" as
+      "streaming" | "complete" | "error" | "cancelled" };
+
+    const persistAssistantMessage = async (
+      status: "streaming" | "complete" | "error" | "cancelled" = "streaming"
+    ) => {
+      if (!assistantMessageId) return;
+
+      if (persistenceStatus.current !== status) {
+        persistenceStatus.current = status;
+      }
+
+      const assistantParts: any[] = [];
+
+      if (textCollected) {
+        assistantParts.push({ type: "text", text: textCollected });
+      }
+
+      if (reasoningCollected) {
+        assistantParts.push({ type: "reasoning", text: reasoningCollected });
+      }
+
+      for (const toolCall of toolCallsCollected) {
+        assistantParts.push({ type: "tool-call", ...toolCall });
+      }
+
+      for (const toolResult of toolResultsCollected) {
+        assistantParts.push({ type: "tool-result", ...toolResult });
+      }
+
+      try {
+        await prisma.message.update({
+          where: { id: assistantMessageId },
+          data: {
+            content: JSON.stringify(assistantParts),
+            status,
+          },
+        });
+      } catch (persistError) {
+        console.error("Failed to persist assistant message", persistError);
+      }
+    };
+
     const stream = new ReadableStream({
       async start(controller) {
         try {
@@ -117,186 +176,110 @@ export async function POST(req: NextRequest) {
             tools,
             stopWhen: stepCountIs(20),
             abortSignal: abortController.signal,
-            prepareStep: async ({ stepNumber, steps }) => {
-              // Return empty object to use default settings
-              return {};
-            },
-            onStepFinish: ({ toolCalls, toolResults, text }) => {
-              // Send tool calls first (if any)
-              if (toolCalls && toolCalls.length > 0) {
-                for (const toolCall of toolCalls) {
-                  // Extract args - try multiple possible properties
-                  let toolArgs = (toolCall as any).args 
-                    || (toolCall as any).arguments 
-                    || (toolCall as any).input
-                    || (toolCall as any).parameters
-                    || {};
-                  
-                  // If toolArgs is still empty, check if the toolCall itself contains the args
-                  if (Object.keys(toolArgs).length === 0) {
-                    // Create a copy without known metadata fields
-                    const { toolCallId, toolName, type, ...possibleArgs } = toolCall as any;
-                    if (Object.keys(possibleArgs).length > 0) {
-                      toolArgs = possibleArgs;
-                    }
-                  }
-                  
-                  // Collect for database
-                  toolCallsCollected.push({
-                    toolCallId: toolCall.toolCallId,
-                    toolName: toolCall.toolName,
-                    args: toolArgs,
-                  });
-                  
-                  // Stream tool call to user
-                  controller.enqueue(
-                    encoder.encode(
-                      `data: ${JSON.stringify({
-                        type: "tool-call",
-                        toolCallId: toolCall.toolCallId,
-                        toolName: toolCall.toolName,
-                        args: toolArgs,
-                      })}\n\n`
-                    )
-                  );
-                }
-              }
-              
-              // Send tool results after execution completes (if any)
-              if (toolResults && toolResults.length > 0) {
-                for (let i = 0; i < toolResults.length; i++) {
-                  const toolResult = toolResults[i];
-                  const toolCall = toolCalls[i];
-                  
-                  // Extract result - could be in result property or the object itself
-                  const resultData = (toolResult as any).result !== undefined 
-                    ? (toolResult as any).result 
-                    : toolResult;
-                  
-                  // Collect for database
-                  toolResultsCollected.push({
-                    toolCallId: toolCall.toolCallId,
-                    toolName: toolCall.toolName,
-                    result: resultData,
-                  });
-                  
-                  controller.enqueue(
-                    encoder.encode(
-                      `data: ${JSON.stringify({
-                        type: "tool-result",
-                        toolCallId: toolCall.toolCallId,
-                        toolName: toolCall.toolName,
-                        result: resultData,
-                      })}\n\n`
-                    )
-                  );
-                }
-              }
-            },
-            onChunk: (event: any) => {
-              try {
-                const t = String(event?.type || "");
-                const isReasoning =
-                  t.includes("reasoning") || event?.part?.type === "reasoning";
-
-                if (!isReasoning) return;
-
-                const candidates: unknown[] = [
-                  event?.delta,
-                  event?.text,
-                  event?.content,
-                  event?.reasoningDelta,
-                  event?.reasoningText,
-                  event?.part?.text,
-                  event?.part?.content,
-                  event?.delta?.text,
-                  event?.delta?.content,
-                ];
-
-                for (const c of candidates) {
-                  if (typeof c === "string" && c) {
-                    reasoningCollected += c;
-                    return;
-                  }
-                }
-              } catch {}
-            },
           });
 
-          // NOTE: Messages are already saved by the frontend before calling this API
-          // We don't need to create them again here to avoid duplicates
-
-          // Stream text chunks and update database periodically
-          let chunkCount = 0;
-          let lastDbUpdate = Date.now();
-          const DB_UPDATE_INTERVAL = 1000; // Update DB every 1 second
+          // Use fullStream to get all events including tool calls
+          for await (const chunk of result.fullStream) {
+            // Handle tool calls (before execution)
+            if (chunk.type === 'tool-call') {
           
-          for await (const textChunk of result.textStream) {
-            chunkCount++;
-            textCollected += textChunk;
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify({ type: "text-delta", textDelta: textChunk })}\n\n`)
-            );
-            
-            // Update database periodically during streaming
-            const now = Date.now();
-            if (now - lastDbUpdate > DB_UPDATE_INTERVAL && assistantMessageId) {
-              lastDbUpdate = now;
-              const currentParts = [
-                { type: "text", text: textCollected, status: "streaming" },
-                ...toolCallsCollected.map(tc => ({ type: "tool-call", ...tc })),
-                ...toolResultsCollected.map(tr => ({ type: "tool-result", ...tr })),
-              ];
               
-              await prisma.message.update({
-                where: { id: assistantMessageId },
-                data: { content: JSON.stringify(currentParts) },
-              }).catch(err => console.error("Failed to update message:", err));
+              // Collect for database
+              toolCallsCollected.push({
+                toolCallId: chunk.toolCallId,
+                toolName: chunk.toolName,
+                args: chunk.input,
+              });
+
+              await persistAssistantMessage();
+              
+              // Stream to client immediately
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "tool-call",
+                    toolCallId: chunk.toolCallId,
+                    toolName: chunk.toolName,
+                    args: chunk.input,
+                  })}\n\n`
+                )
+              );
+            }
+            
+            // Handle tool results (after execution)
+            else if (chunk.type === 'tool-result') {
+           
+              
+              // Collect for database
+              toolResultsCollected.push({
+                toolCallId: chunk.toolCallId,
+                toolName: chunk.toolName,
+                result: chunk.output,
+              });
+
+              await persistAssistantMessage();
+              
+              // Stream to client
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "tool-result",
+                    toolCallId: chunk.toolCallId,
+                    toolName: chunk.toolName,
+                    result: chunk.output,
+                  })}\n\n`
+                )
+              );
+            }
+            
+            // Handle text deltas
+            else if (chunk.type === 'text-delta') {
+              const text = (chunk as any).text || "";
+              textCollected += text;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "text-delta",
+                    textDelta: text,
+                  })}\n\n`
+                )
+              );
+
+              await persistAssistantMessage();
+            }
+            
+            // Handle reasoning
+            else if (chunk.type === 'reasoning-delta') {
+              const text = (chunk as any).text || "";
+              reasoningCollected += text;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "reasoning-delta",
+                    textDelta: text,
+                  })}\n\n`
+                )
+              );
+
+              await persistAssistantMessage();
+            }
+            
+            // Handle errors
+            else if (chunk.type === 'error') {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "error",
+                    error: chunk.error,
+                  })}\n\n`
+                )
+              );
             }
           }
 
-          // Wait for all steps to complete (tool calls finish)
-          await result.text;
+          await persistAssistantMessage("complete");
 
-          // Send reasoning if collected
-          if (reasoningCollected) {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "reasoning-delta",
-                  reasoningDelta: reasoningCollected,
-                })}\n\n`
-              )
-            );
-          }
-
-          // Update assistant message with FINAL content
-          const assistantParts: any[] = [];
-          
-          if (textCollected) {
-            assistantParts.push({ type: "text", text: textCollected, status: "complete" });
-          }
-          
-          if (reasoningCollected) {
-            assistantParts.push({ type: "reasoning", text: reasoningCollected });
-          }
-          
-          for (const toolCall of toolCallsCollected) {
-            assistantParts.push({ type: "tool-call", ...toolCall });
-          }
-          
-          for (const toolResult of toolResultsCollected) {
-            assistantParts.push({ type: "tool-result", ...toolResult });
-          }
-
-          if (assistantMessageId) {
-            await prisma.message.update({
-              where: { id: assistantMessageId },
-              data: { content: JSON.stringify(assistantParts) },
-            });
-          }
-
-          // Send finish event after everything is done
+          // Send finish event
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify({ type: "finish" })}\n\n`)
           );
@@ -306,15 +289,34 @@ export async function POST(req: NextRequest) {
           // Check if it was aborted
           if (error.name === 'AbortError') {
             console.log("🛑 Stream aborted by client");
+            await persistAssistantMessage("cancelled");
             controller.enqueue(
               encoder.encode(
                 `data: ${JSON.stringify({ type: "error", error: "Generation stopped by user" })}\n\n`
               )
             );
           } else {
+            await persistAssistantMessage("error");
+            
+            // Check for OpenRouter credits error
+            const isCreditsError = error.statusCode === 402 || 
+                                   error.message?.includes("Insufficient credits") ||
+                                   error.responseBody?.includes("Insufficient credits");
+            
+            const errorMessage = isCreditsError 
+              ? "Insufficient OpenRouter credits. Please add more credits at https://openrouter.ai/settings/credits"
+              : error.message;
+            
+            const errorType = isCreditsError ? "credits_error" : "error";
+            
             controller.enqueue(
               encoder.encode(
-                `data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`
+                `data: ${JSON.stringify({ 
+                  type: errorType, 
+                  error: errorMessage,
+                  statusCode: error.statusCode,
+                  isCreditsError 
+                })}\n\n`
               )
             );
           }

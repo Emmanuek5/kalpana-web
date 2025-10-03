@@ -36,6 +36,14 @@ interface FileEdit {
 }
 
 let filesEdited: FileEdit[] = [];
+let fileEditCallback: ((edit: FileEdit) => void) | null = null;
+
+/**
+ * Set callback for file edit events
+ */
+export function setFileEditCallback(callback: (edit: FileEdit) => void) {
+  fileEditCallback = callback;
+}
 
 /**
  * Get all edited files
@@ -49,19 +57,58 @@ export function getEditedFiles(): FileEdit[] {
  */
 export function clearEditedFiles(): void {
   filesEdited = [];
+  fileEditCallback = null;
 }
 
 /**
- * Generate a simple diff between two strings
+ * Generate a simple diff between two strings (optimized to show only changes with context)
  */
 function generateDiff(original: string, updated: string): string {
   const originalLines = original.split("\n");
   const updatedLines = updated.split("\n");
 
-  const diff: string[] = [];
+  // Find changed lines
+  const changes: number[] = [];
   const maxLines = Math.max(originalLines.length, updatedLines.length);
 
   for (let i = 0; i < maxLines; i++) {
+    const origLine = originalLines[i];
+    const updLine = updatedLines[i];
+
+    if (origLine !== updLine) {
+      changes.push(i);
+    }
+  }
+
+  // If no changes, return simple message
+  if (changes.length === 0) {
+    return "No changes";
+  }
+
+  // Build diff with context (3 lines before/after changes)
+  const CONTEXT_LINES = 3;
+  const diff: string[] = [];
+  const includedLines = new Set<number>();
+
+  // Mark lines to include (changes + context)
+  changes.forEach(lineNum => {
+    for (let i = Math.max(0, lineNum - CONTEXT_LINES); 
+         i <= Math.min(maxLines - 1, lineNum + CONTEXT_LINES); 
+         i++) {
+      includedLines.add(i);
+    }
+  });
+
+  // Generate diff output
+  const sortedLines = Array.from(includedLines).sort((a, b) => a - b);
+  let lastLine = -10;
+
+  sortedLines.forEach(i => {
+    // Add separator if there's a gap
+    if (i > lastLine + 1) {
+      diff.push("...");
+    }
+
     const origLine = originalLines[i];
     const updLine = updatedLines[i];
 
@@ -75,7 +122,9 @@ function generateDiff(original: string, updated: string): string {
     } else {
       diff.push(`  ${origLine}`);
     }
-  }
+
+    lastLine = i;
+  });
 
   return diff.join("\n");
 }
@@ -182,14 +231,27 @@ export const write_file = tool({
       ? generateDiff(originalContent, content)
       : `+ ${content}`;
 
-    filesEdited.push({
+    const fileEdit: FileEdit = {
       path: filePath,
-      operation: existed ? "modified" : "created",
+      operation: (existed ? "modified" : "created") as "created" | "modified",
       timestamp: new Date().toISOString(),
       originalContent: existed ? originalContent : "",
       newContent: content,
       diff,
-    });
+    };
+
+    filesEdited.push(fileEdit);
+
+    // Emit file edit event in real-time
+    console.log(`[write_file] File edit tracked: ${fileEdit.path} (${fileEdit.operation})`);
+    console.log(`[write_file] Callback exists: ${!!fileEditCallback}`);
+    if (fileEditCallback) {
+      console.log(`[write_file] Calling fileEditCallback...`);
+      fileEditCallback(fileEdit);
+      console.log(`[write_file] fileEditCallback called successfully`);
+    } else {
+      console.warn(`[write_file] ⚠️ fileEditCallback is null! File edit will not be emitted.`);
+    }
 
     return { success: true, operation: existed ? "modified" : "created" };
   },
@@ -283,13 +345,20 @@ export const search_files = tool({
 /**
  * Command Execution Tools
  */
+
+// Track running terminal commands
+const terminalOutputs = new Map<string, { output: string; isRunning: boolean; startTime: number }>();
+
 export const run_command = tool({
   description:
-    "Run a shell command in the workspace. Use this to install dependencies, run tests, build, etc.",
+    "Run a shell command in the VS Code integrated terminal and get immediate output. For quick commands (<5s), returns output directly. For long-running commands, returns a terminalId to fetch output later using get_terminal_output.",
   inputSchema: z.object({
     command: z.string().describe("Command to run"),
+    terminalName: z.string().optional().describe("Name of the terminal (defaults to 'Kalpana Agent')"),
+    waitForOutput: z.boolean().optional().default(true).describe("Wait for command to complete (default: true). Set false for long-running commands."),
+    timeout: z.number().optional().default(5000).describe("Timeout in milliseconds to wait for output (default: 5000ms)"),
   }),
-  execute: async ({ command }) => {
+  execute: async ({ command, terminalName, waitForOutput, timeout }) => {
     console.log(`[Tool] run_command: ${command}`);
 
     // Security: Whitelist allowed commands
@@ -332,14 +401,76 @@ export const run_command = tool({
       };
     }
 
+    const terminalLabel = terminalName || "Kalpana Agent";
+    const terminalId = `${terminalLabel}-${Date.now()}`;
+
+    // Try to run in VS Code terminal first and get output
+    try {
+      const response = await fetch("http://localhost:3001/vscode-command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "runInTerminalAndCapture",
+          payload: { 
+            command, 
+            terminalName: terminalLabel,
+            terminalId,
+            waitForOutput,
+            timeout 
+          },
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        // Store terminal info for later retrieval
+        terminalOutputs.set(terminalId, {
+          output: result.output || "",
+          isRunning: result.isRunning || false,
+          startTime: Date.now(),
+        });
+
+        if (result.isRunning) {
+          return {
+            success: true,
+            terminalId,
+            terminal: terminalLabel,
+            isRunning: true,
+            partialOutput: result.output || "",
+            message: `Command "${command}" is running in terminal. Use get_terminal_output with terminalId "${terminalId}" to fetch output.`,
+          };
+        } else {
+          return {
+            success: true,
+            terminalId,
+            terminal: terminalLabel,
+            output: result.output || "",
+            exitCode: result.exitCode || 0,
+            message: `Command completed in terminal "${terminalLabel}"`,
+          };
+        }
+      }
+    } catch (terminalError: any) {
+      console.warn(`[run_command] Terminal not available, falling back to direct execution: ${terminalError.message}`);
+    }
+
+    // Fallback: Execute directly if terminal not available
     try {
       const { stdout, stderr } = await execAsync(command, {
         cwd: WORKSPACE_ROOT,
-        timeout: 30000, // 30s timeout
+        timeout: timeout || 30000,
         maxBuffer: 1024 * 1024 * 10, // 10MB
       });
 
-      return { success: true, stdout, stderr, exitCode: 0 };
+      return { 
+        success: true, 
+        stdout, 
+        stderr, 
+        exitCode: 0,
+        terminalFallback: true,
+        message: "Terminal unavailable, executed command directly inside container"
+      };
     } catch (error: any) {
       return {
         success: false,
@@ -349,6 +480,69 @@ export const run_command = tool({
         exitCode: error.code || 1,
       };
     }
+  },
+});
+
+export const get_terminal_output = tool({
+  description:
+    "Get the current output from a running or completed terminal command. Use the terminalId returned from run_command.",
+  inputSchema: z.object({
+    terminalId: z.string().describe("Terminal ID from run_command"),
+  }),
+  execute: async ({ terminalId }) => {
+    console.log(`[Tool] get_terminal_output: ${terminalId}`);
+
+    // Try to get output from VS Code terminal
+    try {
+      const response = await fetch("http://localhost:3001/vscode-command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "getTerminalOutput",
+          payload: { terminalId },
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        // Update stored output
+        if (terminalOutputs.has(terminalId)) {
+          terminalOutputs.set(terminalId, {
+            output: result.output || "",
+            isRunning: result.isRunning || false,
+            startTime: terminalOutputs.get(terminalId)!.startTime,
+          });
+        }
+
+        return {
+          success: true,
+          terminalId,
+          output: result.output || "",
+          isRunning: result.isRunning || false,
+          exitCode: result.exitCode,
+        };
+      }
+    } catch (error: any) {
+      console.error(`[get_terminal_output] Error: ${error.message}`);
+    }
+
+    // Fallback: Check local storage
+    const stored = terminalOutputs.get(terminalId);
+    if (stored) {
+      return {
+        success: true,
+        terminalId,
+        output: stored.output,
+        isRunning: stored.isRunning,
+        message: "Retrieved from local storage (terminal may not be available)",
+      };
+    }
+
+    return {
+      success: false,
+      error: `Terminal ID "${terminalId}" not found`,
+    };
   },
 });
 
@@ -733,6 +927,338 @@ export const run_tests = tool({
 });
 
 /**
+ * Advanced search and inspection tools
+ */
+export const grep_in_file = tool({
+  description: "Search for a pattern within a specific file using grep. Returns matching lines with line numbers.",
+  inputSchema: z.object({
+    path: z.string().describe("File path to search in"),
+    pattern: z.string().describe("Pattern to search for (supports regex)"),
+    caseInsensitive: z.boolean().optional().default(false).describe("Case-insensitive search"),
+    contextLines: z.number().optional().default(0).describe("Number of context lines before/after match"),
+  }),
+  execute: async ({ path: filePath, pattern, caseInsensitive, contextLines }) => {
+    const fullPath = sanitizePath(filePath);
+    console.log(`[Tool] grep_in_file: ${pattern} in ${fullPath}`);
+
+    try {
+      if (!existsSync(fullPath)) {
+        return { error: "File not found" };
+      }
+
+      const caseFlag = caseInsensitive ? "-i" : "";
+      const contextFlag = contextLines > 0 ? `-C ${contextLines}` : "";
+      
+      const { stdout } = await execAsync(
+        `grep -n ${caseFlag} ${contextFlag} "${pattern}" "${fullPath}" || true`,
+        {
+          cwd: WORKSPACE_ROOT,
+          maxBuffer: 1024 * 1024 * 5,
+        }
+      );
+
+      const matches = stdout
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => {
+          const colonIndex = line.indexOf(":");
+          if (colonIndex > 0) {
+            const lineNum = line.substring(0, colonIndex);
+            const content = line.substring(colonIndex + 1);
+            return { line: parseInt(lineNum), content };
+          }
+          return { line: 0, content: line };
+        });
+
+      return {
+        path: filePath,
+        pattern,
+        matches,
+        count: matches.length,
+      };
+    } catch (error: any) {
+      return { error: error.message, matches: [], count: 0 };
+    }
+  },
+});
+
+export const grep_in_directory = tool({
+  description: "Search for a pattern recursively in all files within a directory using grep. Returns matching files and lines.",
+  inputSchema: z.object({
+    path: z.string().optional().default(".").describe("Directory path to search in"),
+    pattern: z.string().describe("Pattern to search for (supports regex)"),
+    filePattern: z.string().optional().describe("File pattern to filter (e.g., '*.ts', '*.js')"),
+    caseInsensitive: z.boolean().optional().default(false).describe("Case-insensitive search"),
+    maxResults: z.number().optional().default(100).describe("Maximum number of matches to return"),
+  }),
+  execute: async ({ path: dirPath, pattern, filePattern, caseInsensitive, maxResults }) => {
+    const fullPath = sanitizePath(dirPath || ".");
+    console.log(`[Tool] grep_in_directory: ${pattern} in ${fullPath}`);
+
+    try {
+      if (!existsSync(fullPath)) {
+        return { error: "Directory not found" };
+      }
+
+      const caseFlag = caseInsensitive ? "-i" : "";
+      const includeFlag = filePattern ? `--include="${filePattern}"` : "";
+      
+      const { stdout } = await execAsync(
+        `grep -rn ${caseFlag} ${includeFlag} "${pattern}" "${fullPath}" 2>/dev/null | head -n ${maxResults} || true`,
+        {
+          cwd: WORKSPACE_ROOT,
+          maxBuffer: 1024 * 1024 * 5,
+        }
+      );
+
+      const matches = stdout
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => {
+          const parts = line.split(":");
+          if (parts.length >= 3) {
+            const file = parts[0].replace(fullPath + "/", "");
+            const lineNum = parseInt(parts[1]);
+            const content = parts.slice(2).join(":");
+            return { file, line: lineNum, content };
+          }
+          return null;
+        })
+        .filter((m) => m !== null);
+
+      return {
+        path: dirPath,
+        pattern,
+        matches,
+        count: matches.length,
+      };
+    } catch (error: any) {
+      return { error: error.message, matches: [], count: 0 };
+    }
+  },
+});
+
+export const count_lines = tool({
+  description: "Count lines in a file or all files in a directory. Useful for understanding code size.",
+  inputSchema: z.object({
+    path: z.string().describe("File or directory path"),
+    filePattern: z.string().optional().describe("File pattern to filter (e.g., '*.ts')"),
+  }),
+  execute: async ({ path: targetPath, filePattern }) => {
+    const fullPath = sanitizePath(targetPath);
+    console.log(`[Tool] count_lines: ${fullPath}`);
+
+    try {
+      if (!existsSync(fullPath)) {
+        return { error: "Path not found" };
+      }
+
+      const stats = await execAsync(`stat -c '%F' "${fullPath}"`);
+      const isDirectory = stats.stdout.trim().includes("directory");
+
+      if (isDirectory) {
+        const findPattern = filePattern ? `-name "${filePattern}"` : "-type f";
+        const { stdout } = await execAsync(
+          `find "${fullPath}" ${findPattern} -exec wc -l {} + 2>/dev/null || echo "0"`,
+          {
+            cwd: WORKSPACE_ROOT,
+            maxBuffer: 1024 * 1024 * 5,
+          }
+        );
+
+        const lines = stdout.split("\n").filter((l) => l.trim());
+        const files = lines.slice(0, -1).map((line) => {
+          const parts = line.trim().split(/\s+/);
+          const count = parseInt(parts[0]);
+          const file = parts.slice(1).join(" ").replace(fullPath + "/", "");
+          return { file, lines: count };
+        });
+
+        const total = files.reduce((sum, f) => sum + f.lines, 0);
+
+        return {
+          path: targetPath,
+          isDirectory: true,
+          files,
+          totalFiles: files.length,
+          totalLines: total,
+        };
+      } else {
+        const { stdout } = await execAsync(`wc -l "${fullPath}"`);
+        const lines = parseInt(stdout.trim().split(/\s+/)[0]) || 0;
+
+        return {
+          path: targetPath,
+          isDirectory: false,
+          lines,
+        };
+      }
+    } catch (error: any) {
+      return { error: error.message };
+    }
+  },
+});
+
+export const file_diff = tool({
+  description: "Compare two files and show the differences using diff command.",
+  inputSchema: z.object({
+    file1: z.string().describe("First file path"),
+    file2: z.string().describe("Second file path"),
+    unified: z.boolean().optional().default(true).describe("Use unified diff format"),
+  }),
+  execute: async ({ file1, file2, unified }) => {
+    const fullPath1 = sanitizePath(file1);
+    const fullPath2 = sanitizePath(file2);
+    console.log(`[Tool] file_diff: ${file1} vs ${file2}`);
+
+    try {
+      if (!existsSync(fullPath1)) {
+        return { error: `File not found: ${file1}` };
+      }
+      if (!existsSync(fullPath2)) {
+        return { error: `File not found: ${file2}` };
+      }
+
+      const diffFlag = unified ? "-u" : "";
+      const { stdout } = await execAsync(
+        `diff ${diffFlag} "${fullPath1}" "${fullPath2}" || true`,
+        {
+          cwd: WORKSPACE_ROOT,
+          maxBuffer: 1024 * 1024 * 5,
+        }
+      );
+
+      return {
+        file1,
+        file2,
+        diff: stdout,
+        hasDifferences: stdout.length > 0,
+      };
+    } catch (error: any) {
+      return { error: error.message };
+    }
+  },
+});
+
+export const head_file = tool({
+  description: "Read the first N lines of a file. Useful for quickly inspecting file headers.",
+  inputSchema: z.object({
+    path: z.string().describe("File path"),
+    lines: z.number().optional().default(10).describe("Number of lines to read"),
+  }),
+  execute: async ({ path: filePath, lines }) => {
+    const fullPath = sanitizePath(filePath);
+    console.log(`[Tool] head_file: ${fullPath} (${lines} lines)`);
+
+    try {
+      if (!existsSync(fullPath)) {
+        return { error: "File not found" };
+      }
+
+      const { stdout } = await execAsync(`head -n ${lines} "${fullPath}"`, {
+        cwd: WORKSPACE_ROOT,
+        maxBuffer: 1024 * 1024 * 5,
+      });
+
+      return {
+        path: filePath,
+        lines: lines,
+        content: stdout,
+      };
+    } catch (error: any) {
+      return { error: error.message };
+    }
+  },
+});
+
+export const tail_file = tool({
+  description: "Read the last N lines of a file. Useful for checking logs or file endings.",
+  inputSchema: z.object({
+    path: z.string().describe("File path"),
+    lines: z.number().optional().default(10).describe("Number of lines to read"),
+  }),
+  execute: async ({ path: filePath, lines }) => {
+    const fullPath = sanitizePath(filePath);
+    console.log(`[Tool] tail_file: ${fullPath} (${lines} lines)`);
+
+    try {
+      if (!existsSync(fullPath)) {
+        return { error: "File not found" };
+      }
+
+      const { stdout } = await execAsync(`tail -n ${lines} "${fullPath}"`, {
+        cwd: WORKSPACE_ROOT,
+        maxBuffer: 1024 * 1024 * 5,
+      });
+
+      return {
+        path: filePath,
+        lines: lines,
+        content: stdout,
+      };
+    } catch (error: any) {
+      return { error: error.message };
+    }
+  },
+});
+
+export const find_duplicates = tool({
+  description: "Find duplicate files in a directory based on content hash (MD5).",
+  inputSchema: z.object({
+    path: z.string().optional().default(".").describe("Directory path to search"),
+    filePattern: z.string().optional().describe("File pattern to filter (e.g., '*.ts')"),
+  }),
+  execute: async ({ path: dirPath, filePattern }) => {
+    const fullPath = sanitizePath(dirPath || ".");
+    console.log(`[Tool] find_duplicates: ${fullPath}`);
+
+    try {
+      if (!existsSync(fullPath)) {
+        return { error: "Directory not found" };
+      }
+
+      const findPattern = filePattern ? `-name "${filePattern}"` : "-type f";
+      const { stdout } = await execAsync(
+        `find "${fullPath}" ${findPattern} -type f -exec md5sum {} + 2>/dev/null || true`,
+        {
+          cwd: WORKSPACE_ROOT,
+          maxBuffer: 1024 * 1024 * 10,
+        }
+      );
+
+      const hashMap = new Map<string, string[]>();
+      
+      stdout.split("\n").forEach((line) => {
+        if (!line.trim()) return;
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          const hash = parts[0];
+          const file = parts.slice(1).join(" ").replace(fullPath + "/", "");
+          
+          if (!hashMap.has(hash)) {
+            hashMap.set(hash, []);
+          }
+          hashMap.get(hash)!.push(file);
+        }
+      });
+
+      const duplicates = Array.from(hashMap.entries())
+        .filter(([_, files]) => files.length > 1)
+        .map(([hash, files]) => ({ hash, files, count: files.length }));
+
+      return {
+        path: dirPath,
+        duplicates,
+        duplicateCount: duplicates.length,
+        totalDuplicateFiles: duplicates.reduce((sum, d) => sum + d.count, 0),
+      };
+    } catch (error: any) {
+      return { error: error.message, duplicates: [], duplicateCount: 0 };
+    }
+  },
+});
+
+/**
  * All available tools
  */
 export const agentTools = {
@@ -742,6 +1268,7 @@ export const agentTools = {
   list_directory,
   search_files,
   run_command,
+  get_terminal_output,
   git_status,
   git_diff,
   git_log,
@@ -753,4 +1280,12 @@ export const agentTools = {
   git_stash,
   install_packages,
   run_tests,
+  // Advanced search and inspection
+  grep_in_file,
+  grep_in_directory,
+  count_lines,
+  file_diff,
+  head_file,
+  tail_file,
+  find_duplicates,
 };

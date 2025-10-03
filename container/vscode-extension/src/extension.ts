@@ -6,6 +6,7 @@ import { registerCheckpointsView } from "./checkpoints-panel";
 import { generateCommitMessage, getGitRepository } from "./commit-generator";
 import { getSelectedCodeContext, formatCodeContext, formatCodeWithInstruction, createWebUIMessageSender } from "./code-context";
 import { registerSelectionMenu, setWebUIMessageSender } from "./selection-menu";
+import { registerBrowserPanel } from "./browser-panel";
 
 // Create output channel for logging
 const outputChannel = vscode.window.createOutputChannel("Kalpana");
@@ -33,6 +34,8 @@ interface VSCodeCommand {
   type:
     | "openFile"
     | "runInTerminal"
+    | "runInTerminalAndCapture"
+    | "getTerminalOutput"
     | "getCodeActions"
     | "applyCodeAction"
     | "goToDefinition"
@@ -71,6 +74,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   let updateTimer: NodeJS.Timeout | undefined;
   const terminals = new Map<string, vscode.Terminal>();
+  const terminalOutputs = new Map<string, { output: string; isRunning: boolean; exitCode?: number }>();
 
   // ========== Initialize Autocomplete Provider ==========
   const autocompleteProvider = new KalpanaInlineCompletionProvider();
@@ -166,6 +170,82 @@ export function activate(context: vscode.ExtensionContext) {
             id: command.id,
             success: true,
             data: { terminal: terminalName, command: cmd },
+          };
+        }
+
+        case "runInTerminalAndCapture": {
+          const { command: cmd, terminalName = "Kalpana", terminalId, waitForOutput = true, timeout = 5000 } = command.payload;
+          
+          // Create a new terminal with shell integration for output capture
+          const terminal = vscode.window.createTerminal({
+            name: terminalName,
+            shellArgs: [],
+          });
+          
+          terminals.set(terminalId, terminal);
+          terminal.show();
+          
+          // Initialize output storage
+          terminalOutputs.set(terminalId, {
+            output: "",
+            isRunning: true,
+          });
+          
+          // Send command
+          terminal.sendText(cmd);
+          
+          if (waitForOutput) {
+            // Wait for output with timeout
+            await new Promise(resolve => setTimeout(resolve, timeout));
+            
+            const stored = terminalOutputs.get(terminalId);
+            return {
+              id: command.id,
+              success: true,
+              data: {
+                terminalId,
+                terminal: terminalName,
+                output: stored?.output || "",
+                isRunning: stored?.isRunning ?? false,
+                exitCode: stored?.exitCode,
+              },
+            };
+          } else {
+            return {
+              id: command.id,
+              success: true,
+              data: {
+                terminalId,
+                terminal: terminalName,
+                isRunning: true,
+                output: "",
+                message: "Command started in background",
+              },
+            };
+          }
+        }
+
+        case "getTerminalOutput": {
+          const { terminalId } = command.payload;
+          const stored = terminalOutputs.get(terminalId);
+          
+          if (!stored) {
+            return {
+              id: command.id,
+              success: false,
+              error: `Terminal ID "${terminalId}" not found`,
+            };
+          }
+          
+          return {
+            id: command.id,
+            success: true,
+            data: {
+              terminalId,
+              output: stored.output,
+              isRunning: stored.isRunning,
+              exitCode: stored.exitCode,
+            },
           };
         }
 
@@ -818,6 +898,21 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }
 
+  async function closeAllEditors(): Promise<void> {
+    try {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    } catch (error) {
+      console.error('Failed to close all editors:', error);
+    }
+  }
+
+  const closeEditorsCommand = vscode.commands.registerCommand(
+    'kalpana.closeAllEditors',
+    async () => {
+      await closeAllEditors();
+    }
+  );
+
   async function countWorkspaceFiles(): Promise<number> {
     try {
       const files = await vscode.workspace.findFiles(
@@ -837,6 +932,10 @@ export function activate(context: vscode.ExtensionContext) {
     getCheckpointDiff,
     restoreCheckpoint
   );
+
+  // ========== Register Mini Browser Panel ==========
+  registerBrowserPanel(context);
+  outputChannel.appendLine("✅ Mini Browser registered");
 
   // ========== AI Commit Message Generator ==========
   const generateCommitCmd = vscode.commands.registerCommand(
@@ -865,7 +964,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  context.subscriptions.push(generateCommitCmd);
+  context.subscriptions.push(generateCommitCmd, closeEditorsCommand);
 
   // ========== Code Selection Context Commands ==========
   // Create WebSocket message sender for code context

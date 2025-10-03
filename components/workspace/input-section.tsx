@@ -1,8 +1,11 @@
 import React from "react";
 import { Loader2, Send, ChevronDown, Paperclip, X, File, Code2, Square } from "lucide-react";
-import type { AttachedImage } from "./types";
 
-export type { AttachedImage } from "./types";
+interface AttachedImage {
+  name: string;
+  mimeType: string;
+  base64: string;
+}
 
 interface MentionedItem {
   type: "file" | "function";
@@ -51,18 +54,96 @@ export const InputSection = React.memo((props: InputSectionProps) => {
   } = props;
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const editableRef = React.useRef<HTMLDivElement>(null);
+  const isTypingRef = React.useRef(false);
+  const placeholder = "Ask anything... (type @ to mention files)";
 
-  // Sync textarea value when input prop changes (e.g., after send)
+  const highlightText = (text: string): string => {
+    if (!text) return '';
+    
+    const mentionRegex = /@[^\s]+/g;
+    return text.replace(mentionRegex, (match) => {
+      return `<span class="bg-sky-500/30 text-sky-300 rounded px-1 py-0.5 font-medium">${match}</span>`;
+    });
+  };
+
+  const saveCursorPosition = () => {
+    const selection = window.getSelection();
+    if (!selection || !editableRef.current) return null;
+    
+    const range = selection.getRangeAt(0);
+    const preCaretRange = range.cloneRange();
+    preCaretRange.selectNodeContents(editableRef.current);
+    preCaretRange.setEnd(range.endContainer, range.endOffset);
+    return preCaretRange.toString().length;
+  };
+
+  const restoreCursorPosition = (position: number) => {
+    if (!editableRef.current) return;
+    
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    let currentPos = 0;
+    const range = document.createRange();
+    range.setStart(editableRef.current, 0);
+    range.collapse(true);
+
+    const nodeStack: Node[] = [editableRef.current];
+    let node: Node | undefined;
+    let foundStart = false;
+
+    while (!foundStart && (node = nodeStack.pop())) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const textLength = node.textContent?.length || 0;
+        if (currentPos + textLength >= position) {
+          range.setStart(node, position - currentPos);
+          foundStart = true;
+        } else {
+          currentPos += textLength;
+        }
+      } else {
+        for (let i = node.childNodes.length - 1; i >= 0; i--) {
+          nodeStack.push(node.childNodes[i]);
+        }
+      }
+    }
+
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  // Update contenteditable when input changes externally (like after send)
   React.useEffect(() => {
-    if (textareaRef.current && textareaRef.current.value !== input) {
-      textareaRef.current.value = input;
+    if (editableRef.current && !isTypingRef.current) {
+      const currentText = editableRef.current.textContent || '';
+      if (currentText !== input) {
+        editableRef.current.textContent = input;
+      }
     }
   }, [input]);
 
-  const handleChange = React.useCallback(
-    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-      const value = e.target.value;
+  const handleInput = React.useCallback(
+    (e: React.FormEvent<HTMLDivElement>) => {
+      const target = e.currentTarget;
+      const value = target.textContent || '';
+      
+      isTypingRef.current = true;
+      
+      // Save cursor position before modifying content
+      const cursorPos = saveCursorPosition();
+      
+      // Apply highlighting in real-time
+      const highlighted = highlightText(value);
+      if (target.innerHTML !== highlighted) {
+        target.innerHTML = highlighted;
+        
+        // Restore cursor position after highlighting
+        if (cursorPos !== null) {
+          restoreCursorPosition(cursorPos);
+        }
+      }
       
       // Notify parent of input change immediately for @ detection
       if (onInputChange) {
@@ -72,24 +153,59 @@ export const InputSection = React.memo((props: InputSectionProps) => {
     [onInputChange]
   );
 
+  const handleBlur = React.useCallback(() => {
+    // Apply highlighting when user stops typing
+    if (editableRef.current) {
+      const cursorPos = saveCursorPosition();
+      const value = editableRef.current.textContent || '';
+      editableRef.current.innerHTML = highlightText(value);
+      if (cursorPos !== null) {
+        restoreCursorPosition(cursorPos);
+      }
+    }
+    isTypingRef.current = false;
+  }, []);
+
+  const handleFocus = React.useCallback(() => {
+    isTypingRef.current = true;
+  }, []);
+
+  const handleKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      // Convert div keyboard event to textarea-like event for compatibility
+      const syntheticEvent = {
+        ...e,
+        currentTarget: {
+          ...e.currentTarget,
+          value: e.currentTarget.textContent || '',
+        },
+      } as any;
+      onKeyDown(syntheticEvent);
+    },
+    [onKeyDown]
+  );
+
   return (
     <div className="px-3 pt-3 pb-4">
       <div className="bg-zinc-900/50 border border-zinc-800/60 rounded-xl hover:border-zinc-700/80 focus-within:border-emerald-500/40 transition-colors flex flex-col">
         <div className="flex flex-col">
-          <textarea
-            ref={textareaRef}
-            rows={2}
-            defaultValue={input}
-            onChange={handleChange}
-            onKeyDown={onKeyDown}
-            placeholder="Ask anything... (type @ to mention files)"
-            disabled={isStreaming}
-            className="w-full bg-transparent px-4 pt-4 pb-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none resize-none disabled:opacity-50 disabled:cursor-not-allowed scrollbar-thin mention-input"
-            style={{ 
-              minHeight: "72px", 
-              maxHeight: "200px",
-            }}
-          />
+          <div className="relative">
+            <div
+              ref={editableRef}
+              contentEditable={!isStreaming}
+              onInput={handleInput}
+              onKeyDown={handleKeyDown}
+              onBlur={handleBlur}
+              onFocus={handleFocus}
+              data-placeholder={placeholder}
+              suppressContentEditableWarning
+              className="w-full bg-transparent px-4 pt-4 pb-3 text-sm text-zinc-100 selection:bg-emerald-500/30 focus:outline-none resize-none disabled:opacity-50 disabled:cursor-not-allowed scrollbar-thin mention-input overflow-y-auto"
+              style={{
+                minHeight: "72px",
+                maxHeight: "200px",
+              }}
+            />
+          </div>
 
           {/* Controls */}
           <div className="flex items-center justify-between px-2 pb-2">

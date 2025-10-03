@@ -23,6 +23,7 @@ import {
   GitBranch,
 } from "lucide-react";
 import { NewDeploymentDialog } from "@/components/deployments/new-deployment-dialog";
+import { NotificationBell } from "@/components/workspace/notification-bell";
 
 interface Domain {
   id: string;
@@ -216,6 +217,7 @@ export default function DeploymentsPage() {
               {deployments.length}{" "}
               {deployments.length === 1 ? "deployment" : "deployments"}
             </Badge>
+            <NotificationBell />
             <Button
               onClick={() => setShowCreateDialog(true)}
               className="bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20"

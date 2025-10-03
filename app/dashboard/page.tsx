@@ -28,9 +28,12 @@ import {
   Sparkles,
   Zap,
   Code2,
+  Rocket,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { NotificationBell } from "@/components/workspace/notification-bell";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface Workspace {
   id: string;
@@ -44,10 +47,18 @@ interface Workspace {
   agentPort?: number;
 }
 
+interface Deployment {
+  id: string;
+  name: string;
+  status: "STOPPED" | "BUILDING" | "DEPLOYING" | "RUNNING" | "STOPPING" | "ERROR";
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingDeployments, setLoadingDeployments] = useState(true);
   const [session, setSession] = useState<any>(null);
   const [hoveredCard, setHoveredCard] = useState<string | null>(null);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -63,16 +74,20 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchSession();
+    fetchWorkspaces();
+    fetchDeployments();
   }, []);
 
-  useEffect(() => {
-    if (session) {
-      fetchWorkspaces();
-    }
-  }, [session]);
-
   const fetchSession = async () => {
-    setSession({ user: { email: "user@example.com" } });
+    try {
+      const res = await fetch("/api/auth/get-session");
+      if (res.ok) {
+        const data = await res.json();
+        setSession(data);
+      }
+    } catch (error) {
+      console.error("Failed to fetch session:", error);
+    }
   };
 
   const fetchWorkspaces = async () => {
@@ -86,6 +101,20 @@ export default function DashboardPage() {
       console.error("Failed to fetch workspaces:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchDeployments = async () => {
+    try {
+      const res = await fetch("/api/deployments");
+      if (res.ok) {
+        const data = await res.json();
+        setDeployments(data.deployments);
+      }
+    } catch (error) {
+      console.error("Failed to fetch deployments:", error);
+    } finally {
+      setLoadingDeployments(false);
     }
   };
 
@@ -324,165 +353,269 @@ export default function DashboardPage() {
               {workspaces.length}
             </Badge>
           </div>
-          <Button
-            size="sm"
-            className="bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20"
-            onClick={() => router.push("/dashboard/new")}
-          >
-            <Plus className="h-4 w-4 mr-2" />
-            New Workspace
-          </Button>
+          <div className="flex items-center gap-3">
+            <NotificationBell />
+            <Button
+              size="sm"
+              className="bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20"
+              onClick={() => router.push("/dashboard/new")}
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              New Workspace
+            </Button>
+          </div>
         </div>
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-7xl mx-auto p-8">
-            {loading ? (
-              <div className="flex items-center justify-center py-32">
-                <div className="relative">
-                  <div className="absolute inset-0 blur-2xl bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 animate-pulse" />
-                  <Loader2 className="h-12 w-12 text-emerald-400 animate-spin relative z-10" />
-                </div>
-              </div>
-            ) : workspaces.length === 0 ? (
-              <Card className="p-20 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 text-center backdrop-blur-xl relative overflow-hidden group">
-                <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 via-transparent to-cyan-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
-                <div className="max-w-md mx-auto relative z-10">
-                  <div className="relative mb-8 inline-block">
-                    <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 blur-2xl animate-pulse" />
-                    <div className="h-24 w-24 rounded-3xl bg-gradient-to-br from-zinc-900 to-zinc-800 border-2 border-zinc-700/50 flex items-center justify-center relative overflow-hidden group-hover:scale-110 transition-transform duration-500">
-                      <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/10 to-cyan-500/10 opacity-0 group-hover:opacity-100 transition-opacity" />
-                      <Terminal className="h-12 w-12 text-zinc-600 group-hover:text-emerald-400 transition-colors relative z-10" />
+          <div className="max-w-7xl mx-auto p-8 space-y-6">
+                {/* Welcome Card */}
+                <Card className="p-8 bg-gradient-to-br from-emerald-900/20 via-zinc-900/40 to-zinc-900/40 border-emerald-800/30 backdrop-blur-xl relative overflow-hidden group">
+                  {/* Animated gradient background */}
+                  <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-cyan-500/5 opacity-50 group-hover:opacity-70 transition-opacity duration-500" />
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_120%,rgba(16,185,129,0.1),transparent_50%)]" />
+                  
+                  <div className="relative z-10 flex items-start justify-between gap-8">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-2">
+                        <h2 className="text-3xl font-bold bg-gradient-to-r from-zinc-100 via-emerald-100 to-zinc-100 bg-clip-text text-transparent">
+                          Welcome back, {session?.user?.name || session?.user?.email?.split('@')[0] || 'User'}!
+                        </h2>
+                        <Sparkles className="h-6 w-6 text-emerald-400 animate-pulse" />
+                      </div>
+                      <p className="text-zinc-400 text-base">
+                        Your AI-powered development environment is ready
+                      </p>
+                    </div>
+                    
+                    {/* Mini Stats Table */}
+                    <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-lg p-4 min-w-[320px]">
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between py-2 border-b border-zinc-800/50">
+                          <div className="flex items-center gap-2">
+                            <div className="h-8 w-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+                              <Code2 className="h-4 w-4 text-emerald-400" />
+                            </div>
+                            <span className="text-sm text-zinc-400">Workspaces</span>
+                          </div>
+                          {loading ? (
+                            <Skeleton className="h-6 w-12 bg-zinc-800" />
+                          ) : (
+                            <span className="text-xl font-bold text-zinc-100">{workspaces.length}</span>
+                          )}
+                        </div>
+                        
+                        <div className="flex items-center justify-between py-2 border-b border-zinc-800/50">
+                          <div className="flex items-center gap-2">
+                            <div className="h-8 w-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+                              <Zap className="h-4 w-4 text-emerald-400" />
+                            </div>
+                            <span className="text-sm text-zinc-400">Running</span>
+                          </div>
+                          {loading ? (
+                            <Skeleton className="h-6 w-12 bg-zinc-800" />
+                          ) : (
+                            <span className="text-xl font-bold text-emerald-400">
+                              {workspaces.filter(w => w.status === 'RUNNING').length}
+                            </span>
+                          )}
+                        </div>
+                        
+                        <div className="flex items-center justify-between py-2">
+                          <div className="flex items-center gap-2">
+                            <div className="h-8 w-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
+                              <Rocket className="h-4 w-4 text-blue-400" />
+                            </div>
+                            <span className="text-sm text-zinc-400">Deployments</span>
+                          </div>
+                          {loadingDeployments ? (
+                            <Skeleton className="h-6 w-12 bg-zinc-800" />
+                          ) : (
+                            <span className="text-xl font-bold text-blue-400">
+                              {deployments.filter(d => d.status === 'RUNNING').length}
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </div>
-                  <h3 className="text-2xl font-bold mb-3 bg-gradient-to-r from-zinc-100 to-zinc-400 bg-clip-text text-transparent">
-                    No workspaces yet
-                  </h3>
-                  <p className="text-zinc-500 mb-10 leading-relaxed text-base">
-                    Create your first workspace to get started with cloud
-                    development. Each workspace gives you a full VSCode
-                    environment with AI assistance.
-                  </p>
-                  <Button
-                    className="bg-gradient-to-r from-emerald-600 to-emerald-500 text-white hover:from-emerald-500 hover:to-emerald-400 transition-all shadow-2xl shadow-emerald-600/40 hover:shadow-emerald-600/60 hover:scale-105 px-8 py-6 text-base"
-                    onClick={() => router.push("/dashboard/new")}
-                  >
-                    <Plus className="h-5 w-5 mr-2" />
-                    Create Your First Workspace
-                  </Button>
-                </div>
-              </Card>
-            ) : (
-              <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
-                {workspaces.map((workspace) => (
-                  <Card
-                    key={workspace.id}
-                    className="group p-6 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 hover:border-zinc-700/80 transition-all cursor-pointer backdrop-blur-xl relative overflow-hidden hover:scale-[1.02] hover:shadow-2xl"
-                    onClick={() => router.push(`/workspace/${workspace.id}`)}
-                    onMouseEnter={() => setHoveredCard(workspace.id)}
-                    onMouseLeave={() => setHoveredCard(null)}
-                  >
-                    <div className="relative z-10">
-                      <div className="flex items-start justify-between mb-5">
-                        <div className="flex-1 min-w-0 mr-3">
-                          <div className="flex items-center gap-2 mb-2">
-                            <Code2 className="h-4 w-4 text-emerald-400" />
-                            <h3 className="text-lg font-semibold text-zinc-100 group-hover:text-emerald-300 transition-colors truncate">
-                              {workspace.name}
-                            </h3>
+                </Card>
+
+                {/* Workspaces Section */}
+                <div>
+                  <h3 className="text-lg font-semibold text-zinc-100 mb-4">Your Workspaces</h3>
+                  {loading ? (
+                    <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                      {[1, 2, 3].map((i) => (
+                        <Card key={i} className="p-5 bg-zinc-900/50 border-zinc-800/60">
+                          <div className="space-y-4">
+                            <div className="flex items-start justify-between">
+                              <div className="flex items-center gap-2.5">
+                                <Skeleton className="h-8 w-8 rounded-lg bg-zinc-800" />
+                                <Skeleton className="h-5 w-32 bg-zinc-800" />
+                              </div>
+                              <Skeleton className="h-6 w-16 bg-zinc-800" />
+                            </div>
+                            <Skeleton className="h-4 w-full bg-zinc-800" />
+                            <Skeleton className="h-4 w-3/4 bg-zinc-800" />
+                            <div className="flex gap-2 pt-2">
+                              <Skeleton className="h-9 flex-1 bg-zinc-800" />
+                              <Skeleton className="h-9 w-9 bg-zinc-800" />
+                              <Skeleton className="h-9 w-9 bg-zinc-800" />
+                            </div>
                           </div>
-                          {workspace.description && (
-                            <p className="text-sm text-zinc-500 line-clamp-2 leading-relaxed">
-                              {workspace.description}
-                            </p>
-                          )}
-                        </div>
-                        <Badge
-                          className={`${statusConfig[workspace.status].color} ${
-                            statusConfig[workspace.status].glow
-                          } text-xs font-semibold flex items-center gap-1.5 shrink-0 px-3 py-1.5`}
-                        >
-                          {statusConfig[workspace.status].icon}
-                          {workspace.status.charAt(0) +
-                            workspace.status.slice(1).toLowerCase()}
-                        </Badge>
-                      </div>
-
-                      {workspace.githubRepo && (
-                        <div className="flex items-center gap-2 text-sm text-zinc-400 mb-5 px-3 py-2.5 rounded-lg bg-zinc-900/80 border border-zinc-800/80 group-hover:border-zinc-700 transition-colors">
-                          <Github className="h-4 w-4 shrink-0 text-zinc-500" />
-                          <span className="truncate font-mono text-xs">
-                            {workspace.githubRepo}
-                          </span>
-                        </div>
-                      )}
-
-                      <div className="flex items-center gap-5 text-xs text-zinc-600 mb-6 pb-5 border-b border-zinc-800/50">
-                        <div className="flex items-center gap-2">
-                          <Clock className="h-4 w-4 text-zinc-500" />
-                          <span>
-                            {new Date(
-                              workspace.lastAccessedAt
-                            ).toLocaleDateString()}
-                          </span>
-                        </div>
-                        {workspace.template && (
-                          <div className="flex items-center gap-2">
-                            <Cpu className="h-4 w-4 text-zinc-500" />
-                            <span className="font-medium">
-                              {workspace.template}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          className={
-                            workspace.status === "RUNNING"
-                              ? "bg-red-500/20 text-red-300 hover:bg-red-500/30 border border-red-500/30 flex-1 h-10 font-medium transition-all"
-                              : "bg-gradient-to-r from-emerald-600 to-emerald-500 text-white hover:from-emerald-500 hover:to-emerald-400 flex-1 h-10 shadow-lg shadow-emerald-600/30 hover:shadow-emerald-600/50 font-medium transition-all hover:scale-105"
-                          }
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleStartStop(workspace);
-                          }}
-                        >
-                          {workspace.status === "RUNNING" ? (
-                            <>
-                              <Square className="h-4 w-4 mr-2" />
-                              Stop
-                            </>
-                          ) : (
-                            <>
-                              <Play className="h-4 w-4 mr-2" />
-                              Start
-                            </>
-                          )}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="border-zinc-800/80 bg-zinc-900/80 hover:bg-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-zinc-300 h-10 px-4 transition-all hover:scale-105"
-                          onClick={(e) => handleOpenSettings(workspace, e)}
-                        >
-                          <Settings className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="border-zinc-800/80 bg-zinc-900/80 hover:bg-red-500/20 hover:border-red-500/40 text-zinc-500 hover:text-red-400 h-10 px-4 transition-all hover:scale-105"
-                          onClick={(e) => handleOpenDelete(workspace, e)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
+                        </Card>
+                      ))}
                     </div>
-                  </Card>
-                ))}
-              </div>
-            )}
+                  ) : workspaces.length === 0 ? (
+                    <Card className="p-20 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 text-center backdrop-blur-xl relative overflow-hidden group">
+                      <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 via-transparent to-cyan-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+                      <div className="max-w-md mx-auto relative z-10">
+                        <div className="relative mb-8 inline-block">
+                          <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 blur-2xl animate-pulse" />
+                          <div className="h-24 w-24 rounded-3xl bg-gradient-to-br from-zinc-900 to-zinc-800 border-2 border-zinc-700/50 flex items-center justify-center relative overflow-hidden group-hover:scale-110 transition-transform duration-500">
+                            <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/10 to-cyan-500/10 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            <Terminal className="h-12 w-12 text-zinc-600 group-hover:text-emerald-400 transition-colors relative z-10" />
+                          </div>
+                        </div>
+                        <h3 className="text-2xl font-bold mb-3 bg-gradient-to-r from-zinc-100 to-zinc-400 bg-clip-text text-transparent">
+                          No workspaces yet
+                        </h3>
+                        <p className="text-zinc-500 mb-10 leading-relaxed text-base">
+                          Create your first workspace to get started with cloud
+                          development. Each workspace gives you a full VSCode
+                          environment with AI assistance.
+                        </p>
+                        <Button
+                          className="bg-gradient-to-r from-emerald-600 to-emerald-500 text-white hover:from-emerald-500 hover:to-emerald-400 transition-all shadow-2xl shadow-emerald-600/40 hover:shadow-emerald-600/60 hover:scale-105 px-8 py-6 text-base"
+                          onClick={() => router.push("/dashboard/new")}
+                        >
+                          <Plus className="h-5 w-5 mr-2" />
+                          Create Your First Workspace
+                        </Button>
+                      </div>
+                    </Card>
+                  ) : (
+                    <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
+                      {workspaces.map((workspace) => (
+                      <Card
+                        key={workspace.id}
+                        className="group p-5 bg-zinc-900/50 border-zinc-800/60 hover:border-emerald-500/40 transition-all cursor-pointer backdrop-blur-xl relative overflow-hidden hover:shadow-xl hover:shadow-emerald-500/10"
+                        onClick={() => router.push(`/workspace/${workspace.id}`)}
+                        onMouseEnter={() => setHoveredCard(workspace.id)}
+                        onMouseLeave={() => setHoveredCard(null)}
+                      >
+                        {/* Hover glow effect */}
+                        <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                        
+                        <div className="relative z-10">
+                          {/* Header */}
+                          <div className="flex items-start justify-between mb-4">
+                            <div className="flex-1 min-w-0 mr-3">
+                              <div className="flex items-center gap-2.5 mb-1.5">
+                                <div className="h-8 w-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center group-hover:bg-emerald-500/20 transition-colors">
+                                  <Code2 className="h-4 w-4 text-emerald-400" />
+                                </div>
+                                <h3 className="text-base font-semibold text-zinc-100 group-hover:text-emerald-300 transition-colors truncate">
+                                  {workspace.name}
+                                </h3>
+                              </div>
+                              {workspace.description && (
+                                <p className="text-xs text-zinc-500 line-clamp-2 leading-relaxed ml-10">
+                                  {workspace.description}
+                                </p>
+                              )}
+                            </div>
+                            <Badge
+                              className={`${statusConfig[workspace.status].color} ${
+                                statusConfig[workspace.status].glow
+                              } text-[10px] font-semibold flex items-center gap-1 shrink-0 px-2 py-1`}
+                            >
+                              {statusConfig[workspace.status].icon}
+                              {workspace.status.charAt(0) +
+                                workspace.status.slice(1).toLowerCase()}
+                            </Badge>
+                          </div>
+
+                          {/* GitHub Repo */}
+                          {workspace.githubRepo && (
+                            <div className="flex items-center gap-2 text-xs text-zinc-400 mb-4 px-2.5 py-2 rounded-md bg-zinc-900/60 border border-zinc-800/60">
+                              <Github className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                              <span className="truncate font-mono">
+                                {workspace.githubRepo}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Metadata */}
+                          <div className="flex items-center gap-4 text-[11px] text-zinc-600 mb-4 pb-4 border-b border-zinc-800/40">
+                            <div className="flex items-center gap-1.5">
+                              <Clock className="h-3.5 w-3.5 text-zinc-500" />
+                              <span>
+                                {new Date(
+                                  workspace.lastAccessedAt
+                                ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                              </span>
+                            </div>
+                            {workspace.template && (
+                              <div className="flex items-center gap-1.5">
+                                <Cpu className="h-3.5 w-3.5 text-zinc-500" />
+                                <span className="font-medium capitalize">
+                                  {workspace.template}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Actions */}
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              className={
+                                workspace.status === "RUNNING"
+                                  ? "bg-red-500/20 text-red-300 hover:bg-red-500/30 border border-red-500/30 flex-1 h-9 text-xs font-medium transition-all"
+                                  : "bg-emerald-600/90 text-white hover:bg-emerald-600 flex-1 h-9 text-xs shadow-md shadow-emerald-600/20 font-medium transition-all"
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleStartStop(workspace);
+                              }}
+                            >
+                              {workspace.status === "RUNNING" ? (
+                                <>
+                                  <Square className="h-3.5 w-3.5 mr-1.5" />
+                                  Stop
+                                </>
+                              ) : (
+                                <>
+                                  <Play className="h-3.5 w-3.5 mr-1.5" />
+                                  Start
+                                </>
+                              )}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-zinc-800/80 bg-zinc-900/60 hover:bg-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-zinc-300 h-9 px-3 transition-all"
+                              onClick={(e) => handleOpenSettings(workspace, e)}
+                            >
+                              <Settings className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-zinc-800/80 bg-zinc-900/60 hover:bg-red-500/20 hover:border-red-500/40 text-zinc-500 hover:text-red-400 h-9 px-3 transition-all"
+                              onClick={(e) => handleOpenDelete(workspace, e)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      </Card>
+                    ))}
+                    </div>
+                  )}
+                </div>
           </div>
         </div>
       </div>

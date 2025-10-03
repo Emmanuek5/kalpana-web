@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { NotificationBell } from "@/components/workspace/notification-bell";
 
 interface Agent {
   id: string;
@@ -167,14 +168,17 @@ export default function AgentsPage() {
               {agents.length}
             </Badge>
           </div>
-          <Button
-            size="sm"
-            className="bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20"
-            onClick={handleOpenCreate}
-          >
-            <Plus className="h-4 w-4 mr-2" />
-            New Agent
-          </Button>
+          <div className="flex items-center gap-3">
+            <NotificationBell />
+            <Button
+              size="sm"
+              className="bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20"
+              onClick={handleOpenCreate}
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              New Agent
+            </Button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -184,18 +188,25 @@ export default function AgentsPage() {
                 <Loader2 className="h-12 w-12 text-emerald-400 animate-spin" />
               </div>
             ) : agents.length === 0 ? (
-              <Card className="p-20 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 text-center backdrop-blur-xl">
-                <div className="max-w-md mx-auto">
-                  <Bot className="h-16 w-16 text-zinc-600 mx-auto mb-6" />
-                  <h3 className="text-2xl font-bold mb-3 text-zinc-100">
+              <Card className="p-20 bg-gradient-to-br from-zinc-900/40 via-zinc-900/30 to-zinc-900/40 border-zinc-800/50 text-center backdrop-blur-xl relative overflow-hidden group">
+                <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 via-transparent to-cyan-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+                <div className="max-w-md mx-auto relative z-10">
+                  <div className="relative mb-8 inline-block">
+                    <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 blur-2xl animate-pulse" />
+                    <div className="h-24 w-24 rounded-3xl bg-gradient-to-br from-zinc-900 to-zinc-800 border-2 border-zinc-700/50 flex items-center justify-center relative overflow-hidden group-hover:scale-110 transition-transform duration-500">
+                      <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/10 to-cyan-500/10 opacity-0 group-hover:opacity-100 transition-opacity" />
+                      <Bot className="h-12 w-12 text-zinc-600 group-hover:text-emerald-400 transition-colors relative z-10" />
+                    </div>
+                  </div>
+                  <h3 className="text-2xl font-bold mb-3 bg-gradient-to-r from-zinc-100 to-zinc-400 bg-clip-text text-transparent">
                     No agents yet
                   </h3>
-                  <p className="text-zinc-500 mb-10">
+                  <p className="text-zinc-500 mb-10 leading-relaxed text-base">
                     Create your first agent to automate code editing tasks on
-                    your GitHub repositories.
+                    your GitHub repositories with AI assistance.
                   </p>
                   <Button
-                    className="bg-gradient-to-r from-emerald-600 to-emerald-500 text-white shadow-lg shadow-emerald-600/20"
+                    className="bg-gradient-to-r from-emerald-600 to-emerald-500 text-white hover:from-emerald-500 hover:to-emerald-400 transition-all shadow-2xl shadow-emerald-600/40 hover:shadow-emerald-600/60 hover:scale-105 px-8 py-6 text-base"
                     onClick={handleOpenCreate}
                   >
                     <Plus className="h-5 w-5 mr-2" />

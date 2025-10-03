@@ -21,6 +21,7 @@ import {
   Link as LinkIcon,
   Unlink,
   AlertCircle,
+  User,
 } from "lucide-react";
 
 interface Model {
@@ -56,12 +57,26 @@ export default function SettingsPage() {
   const [disconnectingGithub, setDisconnectingGithub] = useState(false);
   const [reconnectingGithub, setReconnectingGithub] = useState(false);
   const [githubError, setGithubError] = useState(false);
+  const [user, setUser] = useState<any>(null);
 
   useEffect(() => {
     fetchSettings();
     fetchModels();
     fetchGithubStatus();
+    fetchUser();
   }, []);
+
+  const fetchUser = async () => {
+    try {
+      const res = await fetch("/api/auth/get-session");
+      if (res.ok) {
+        const data = await res.json();
+        setUser(data.user);
+      }
+    } catch (error) {
+      console.error("Failed to fetch user:", error);
+    }
+  };
 
   useEffect(() => {
     if (searchQuery) {
@@ -330,6 +345,40 @@ export default function SettingsPage() {
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-5xl mx-auto p-8 space-y-8">
+            {/* User Profile Section */}
+            <Card className="p-6 bg-gradient-to-br from-emerald-900/20 via-zinc-900/40 to-zinc-900/40 border-emerald-800/30 backdrop-blur-xl relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 via-transparent to-transparent opacity-50" />
+              <div className="relative z-10 flex items-center gap-6">
+                {user?.image ? (
+                  <img
+                    src={user.image}
+                    alt={user.name || user.email}
+                    className="h-20 w-20 rounded-full ring-4 ring-emerald-500/20 object-cover"
+                  />
+                ) : (
+                  <div className="h-20 w-20 rounded-full bg-gradient-to-br from-emerald-600/20 to-emerald-500/10 flex items-center justify-center ring-4 ring-emerald-700/30">
+                    <User className="h-10 w-10 text-emerald-400" />
+                  </div>
+                )}
+                <div className="flex-1">
+                  <h2 className="text-2xl font-bold text-zinc-100 mb-1">
+                    {user?.name || 'User'}
+                  </h2>
+                  <p className="text-sm text-zinc-400 mb-2">{user?.email}</p>
+                  <div className="flex items-center gap-2">
+                    <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
+                      Active
+                    </Badge>
+                    {user?.emailVerified && (
+                      <Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30">
+                        Verified
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </Card>
+
             {/* API Key Section */}
             <div>
               <div className="mb-4">

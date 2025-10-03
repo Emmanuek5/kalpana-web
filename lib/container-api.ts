@@ -310,6 +310,96 @@ export class ContainerAPI {
       character,
     });
   }
+
+  // ========== Advanced Search and Inspection Tools ==========
+  async grepInFile(
+    workspaceId: string,
+    path: string,
+    pattern: string,
+    caseInsensitive?: boolean,
+    contextLines?: number
+  ): Promise<any> {
+    return await this.sendCommand(workspaceId, "grepInFile", {
+      path,
+      pattern,
+      caseInsensitive,
+      contextLines,
+    });
+  }
+
+  async grepInDirectory(
+    workspaceId: string,
+    path: string | undefined,
+    pattern: string,
+    filePattern?: string,
+    caseInsensitive?: boolean,
+    maxResults?: number
+  ): Promise<any> {
+    return await this.sendCommand(workspaceId, "grepInDirectory", {
+      path,
+      pattern,
+      filePattern,
+      caseInsensitive,
+      maxResults,
+    });
+  }
+
+  async countLines(
+    workspaceId: string,
+    path: string,
+    filePattern?: string
+  ): Promise<any> {
+    return await this.sendCommand(workspaceId, "countLines", {
+      path,
+      filePattern,
+    });
+  }
+
+  async fileDiff(
+    workspaceId: string,
+    file1: string,
+    file2: string,
+    unified?: boolean
+  ): Promise<any> {
+    return await this.sendCommand(workspaceId, "fileDiff", {
+      file1,
+      file2,
+      unified,
+    });
+  }
+
+  async headFile(
+    workspaceId: string,
+    path: string,
+    lines?: number
+  ): Promise<any> {
+    return await this.sendCommand(workspaceId, "headFile", {
+      path,
+      lines,
+    });
+  }
+
+  async tailFile(
+    workspaceId: string,
+    path: string,
+    lines?: number
+  ): Promise<any> {
+    return await this.sendCommand(workspaceId, "tailFile", {
+      path,
+      lines,
+    });
+  }
+
+  async findDuplicates(
+    workspaceId: string,
+    path?: string,
+    filePattern?: string
+  ): Promise<any> {
+    return await this.sendCommand(workspaceId, "findDuplicates", {
+      path,
+      filePattern,
+    });
+  }
 }
 
 // Singleton instance
