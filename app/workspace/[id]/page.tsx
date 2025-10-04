@@ -25,6 +25,7 @@ import {
   Code2,
   Rocket,
   Users,
+  Database,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -41,6 +42,7 @@ import {
   type DynamicTab,
 } from "@/components/workspace/dynamic-tab-bar";
 import { LiveSharePanel } from "@/components/workspace/live-share-panel";
+import { DatabasesPanel } from "@/components/workspace/databases-panel";
 
 // Custom scrollbar styles
 const scrollbarStyles = `
@@ -1752,6 +1754,13 @@ export default function WorkspacePage({
         icon: Rocket,
         priority: 50,
         content: <DeploymentsPanel workspaceId={workspace?.id || ""} />,
+      },
+      {
+        id: "databases",
+        label: "Databases",
+        icon: Database,
+        priority: 40,
+        content: <DatabasesPanel workspaceId={workspace?.id || ""} />,
       },
     ];
 

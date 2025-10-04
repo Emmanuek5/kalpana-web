@@ -174,6 +174,20 @@ export class PortManager {
       if (agent.agentPort) used.add(agent.agentPort);
     });
 
+    // Check database ports
+    const databases: {
+      port: number;
+    }[] = await prisma.database.findMany({
+      where: {
+        status: { in: ["CREATING", "RUNNING"] },
+      },
+      select: { port: true },
+    });
+
+    databases.forEach((db) => {
+      used.add(db.port);
+    });
+
     return used;
   }
 
@@ -374,4 +388,38 @@ export class PortManager {
 
     throw new Error("No alternative consecutive ports available");
   }
+
+  /**
+   * Allocate a single port (for databases)
+   */
+  async allocatePort(): Promise<number> {
+    console.log(
+      `🔍 Searching for available port in range ${this.minPort}-${this.maxPort}...`
+    );
+    const usedPorts = await this.getUsedPortsFromDb();
+
+    for (let port = this.minPort; port <= this.maxPort; port++) {
+      if (usedPorts.has(port) || UNASSINGABLE_PORTS.includes(port)) continue;
+
+      // eslint-disable-next-line no-await-in-loop
+      const isAvailable = await this.canBind(port);
+      if (!isAvailable) continue;
+
+      console.log(`✅ Allocated port: ${port}`);
+      return port;
+    }
+
+    throw new Error(
+      `❌ No available ports in range ${this.minPort}-${this.maxPort}`
+    );
+  }
+
+  /**
+   * Release a single port
+   */
+  async releasePort(port: number): Promise<void> {
+    console.log(`🔓 Released port: ${port}`);
+    // Port is released automatically when database record is updated/deleted
+  }
 }
+

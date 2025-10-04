@@ -30,6 +30,7 @@ import {
   Copy,
   FileText,
   Edit,
+  Server,
 } from "lucide-react";
 import { DeploymentTerminal } from "./deployment-terminal";
 import { DeploymentLogs } from "./deployment-logs";
@@ -385,8 +386,11 @@ export function DeploymentsPanel({ workspaceId }: DeploymentsPanelProps) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <Loader2 className="h-8 w-8 text-emerald-500 animate-spin" />
+      <div className="h-full flex items-center justify-center">
+        <div className="text-center">
+          <Server className="h-12 w-12 text-zinc-700 animate-pulse mx-auto mb-3" />
+          <p className="text-sm text-zinc-500">Loading deployments...</p>
+        </div>
       </div>
     );
   }

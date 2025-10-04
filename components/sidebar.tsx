@@ -18,6 +18,7 @@ import {
   Rocket,
   Coins,
   Users as UsersIcon,
+  Database,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { Button } from "./ui/button";
@@ -82,6 +83,12 @@ export function Sidebar() {
       href: "/dashboard",
       icon: LayoutDashboard,
       active: pathname === "/dashboard",
+    },
+    {
+      name: "Databases",
+      href: "/dashboard/databases",
+      icon: Database,
+      active: pathname.startsWith("/dashboard/databases"),
     },
     {
       name: "Deployments",

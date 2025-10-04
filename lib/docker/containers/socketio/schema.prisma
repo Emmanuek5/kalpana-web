@@ -14,23 +14,27 @@ model User {
   image               String?
   emailVerified       Boolean     @default(false)
   
-  // OAuth
-  githubId            String?     @unique
-  githubToken         String?     // Encrypted
-  
+
   // OpenRouter settings
-  openrouterApiKey    String?     // User's personal OpenRouter API key
-  favoriteModels      String[]    @default([]) // Array of favorite model IDs (max 10)
-  defaultModel        String?     // Default model to use in chat
+  openrouterApiKey    String?
+  favoriteModels      String[]    @default([])
+  defaultModel        String?
   
   // Relations
   workspaces          Workspace[]
   sessions            Session[]
-  accounts            Account[]
+  accounts            Account[]   // ← This is where OAuth data is stored
   presets             Preset[]
   domains             Domain[]
   agents              Agent[]
   deployments         Deployment[]
+  notifications       Notification[]
+  databases           Database[]
+  
+  // Team relations
+  ownedTeams          Team[]              @relation("TeamOwner")
+  teamMemberships     TeamMember[]
+  sentInvitations     TeamInvitation[]    @relation("InvitedBy")
   
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
@@ -94,6 +98,7 @@ model Workspace {
   // Configuration
   githubRepo      String?
   githubBranch    String?         @default("main")
+  githubSource    String?         @default("personal") // "personal" or "team" - which GitHub account to use
   nixConfig       String?
   template        String?
   preset          String?         @default("default")
@@ -102,10 +107,15 @@ model Workspace {
   userId          String          @db.ObjectId
   user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   
+  // Team relation (optional)
+  teamId          String?         @db.ObjectId
+  team            Team?           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
   // Relations
   chats           Chat[]
   deployments     Deployment[]
   checkpoints     AgentCheckpoint[]
+  databases       Database[]
   
   // Metadata
   lastAccessedAt  DateTime        @default(now())
@@ -113,6 +123,7 @@ model Workspace {
   updatedAt       DateTime        @updatedAt
   
   @@index([userId])
+  @@index([teamId])
   @@index([status])
   @@index([lastAccessedAt])
 }
@@ -162,9 +173,14 @@ model Preset {
   userId          String   @db.ObjectId
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
+  // Team relation (optional)
+  teamId          String?  @db.ObjectId
+  team            Team?    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
   updatedAt       DateTime @updatedAt
   
   @@index([userId])
+  @@index([teamId])
 }
 
 model Message {
@@ -281,6 +297,7 @@ model Domain {
   
   // Relations
   deployments     Deployment[] @relation("DeploymentDomain")
+  databases       Database[]
   
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
@@ -297,6 +314,7 @@ model Deployment {
   // GitHub repository (for standalone deployments)
   githubRepo      String?           // e.g., "owner/repo"
   githubBranch    String?           @default("main")
+  githubSource    String?           @default("personal") // "personal" or "team" - which GitHub account to use
   rootDirectory   String?           // Root directory in repo (for monorepos)
   
   // Container metadata
@@ -327,6 +345,10 @@ model Deployment {
   userId          String            @db.ObjectId
   user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   
+  // Team relation (optional)
+  teamId          String?           @db.ObjectId
+  team            Team?             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
   // Workspace relation (OPTIONAL - for workspace-based deployments)
   workspaceId     String?           @db.ObjectId
   workspace       Workspace?        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -340,6 +362,7 @@ model Deployment {
   updatedAt       DateTime          @updatedAt
   
   @@index([userId])
+  @@index([teamId])
   @@index([workspaceId])
   @@index([status])
   @@index([subdomain])
@@ -373,6 +396,7 @@ model Agent {
   
   // AI Configuration
   model           String        @default("anthropic/claude-3.5-sonnet") // OpenRouter model to use
+  githubSource    String?       @default("personal") // "personal" or "team" - which GitHub account to use
   
   // Execution data
   toolCalls       String?       // JSON array of tool calls/messages
@@ -389,6 +413,10 @@ model Agent {
   userId          String        @db.ObjectId
   user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   
+  // Team relation (optional)
+  teamId          String?       @db.ObjectId
+  team            Team?         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
   // Metadata
   startedAt       DateTime?
   completedAt     DateTime?
@@ -398,6 +426,191 @@ model Agent {
   updatedAt       DateTime      @updatedAt
   
   @@index([userId])
+  @@index([teamId])
   @@index([status])
   @@index([createdAt])
+}
+
+enum NotificationType {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+model Notification {
+  id              String            @id @default(auto()) @map("_id") @db.ObjectId
+  userId          String            @db.ObjectId
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  type            NotificationType  @default(INFO)
+  title           String
+  message         String
+  read            Boolean           @default(false)
+  
+  // Optional action button
+  actionLabel     String?
+  actionUrl       String?
+  
+  // Metadata
+  workspaceId     String?           @db.ObjectId // Optional link to workspace
+  agentId         String?           @db.ObjectId // Optional link to agent
+  deploymentId    String?           @db.ObjectId // Optional link to deployment
+  
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  @@index([userId])
+  @@index([read])
+  @@index([createdAt])
+}
+
+// ============================================
+// TEAM MODELS
+// ============================================
+
+model Team {
+  id          String           @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  slug        String           @unique
+  description String?
+  image       String?
+  
+  // Owner
+  ownerId     String           @db.ObjectId
+  owner       User             @relation("TeamOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  // Team integrations
+  githubAccessToken String?      // Encrypted GitHub access token for team
+  githubUsername    String?      // GitHub username/org for team
+  openrouterApiKey  String?      // Encrypted OpenRouter API key for team
+  
+  // Relations
+  members     TeamMember[]
+  invitations TeamInvitation[]
+  workspaces  Workspace[]
+  deployments Deployment[]
+  agents      Agent[]
+  presets     Preset[]
+  databases   Database[]
+  
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  
+  @@index([ownerId])
+}
+
+model TeamMember {
+  id        String     @id @default(auto()) @map("_id") @db.ObjectId
+  teamId    String     @db.ObjectId
+  team      Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  userId    String     @db.ObjectId
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  role      TeamRole   @default(MEMBER)
+  
+  joinedAt  DateTime   @default(now())
+  
+  @@unique([teamId, userId])
+  @@index([teamId])
+  @@index([userId])
+}
+
+enum TeamRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+model TeamInvitation {
+  id         String     @id @default(auto()) @map("_id") @db.ObjectId
+  teamId     String     @db.ObjectId
+  team       Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  email      String
+  role       TeamRole   @default(MEMBER)
+  token      String     @unique
+  
+  invitedBy  String     @db.ObjectId
+  inviter    User       @relation("InvitedBy", fields: [invitedBy], references: [id], onDelete: Cascade)
+  
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  
+  createdAt  DateTime   @default(now())
+  
+  @@index([teamId])
+  @@index([email])
+  @@index([expiresAt])
+}
+
+model Database {
+  id          String         @id @default(auto()) @map("_id") @db.ObjectId
+  name        String         // e.g., "myapp_production"
+  description String?        // Optional description
+  
+  // Ownership - can be user-owned or team-owned
+  userId      String         @db.ObjectId
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  teamId      String?        @db.ObjectId
+  team        Team?          @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  // Optional workspace link (null = standalone database)
+  workspaceId String?        @db.ObjectId
+  workspace   Workspace?     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  // Database configuration
+  type        DatabaseType
+  containerId String?        // Docker container ID
+  
+  // Connection details
+  host        String         @default("localhost")
+  port        Int            // Dynamically allocated port
+  username    String
+  password    String         // Store encrypted in production
+  database    String         // Database name within the server
+  
+  // Domain integration (optional)
+  domainId    String?        @db.ObjectId
+  domain      Domain?        @relation(fields: [domainId], references: [id], onDelete: SetNull)
+  subdomain   String?        // e.g., "postgres-mydb"
+  
+  // Docker networking
+  networkName  String?       // Docker network name
+  internalHost String?       // Internal hostname for Docker network
+  
+  // Status
+  status      DatabaseStatus @default(STOPPED)
+  
+  // Metadata
+  version     String?        // Database version (e.g., "16" for PostgreSQL 16)
+  volumeName  String?        // Persistent volume name
+  
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  
+  @@unique([userId, name])
+  @@index([userId])
+  @@index([workspaceId])
+  @@index([teamId])
+  @@index([status])
+  @@index([domainId])
+}
+
+enum DatabaseType {
+  POSTGRES
+  MYSQL
+  MONGODB
+  REDIS
+  SQLITE
+}
+
+enum DatabaseStatus {
+  CREATING
+  RUNNING
+  STOPPED
+  ERROR
 }
