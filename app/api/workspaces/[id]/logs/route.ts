@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 import { headers } from "next/headers";
 import { prisma } from "@/lib/db";
 import { dockerManager } from "@/lib/docker/manager";
@@ -20,17 +21,12 @@ export async function GET(
     const { id } = await context.params;
 
     // Verify ownership
-    const workspace = await prisma.workspace.findFirst({
-      where: {
-        id,
-        userId: session.user.id,
-      },
-    });
-
+    // Verify user has access to this workspace
+    const workspace = await authorizeWorkspaceAccess(id, session.user.id);
     if (!workspace) {
       return NextResponse.json(
-        { error: "Workspace not found" },
-        { status: 404 }
+        { error: "You are not authorized to access this workspace" },
+        { status: 403 }
       );
     }
 

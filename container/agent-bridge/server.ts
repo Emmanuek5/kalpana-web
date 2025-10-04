@@ -60,15 +60,85 @@ function connectToVSCodeExtension() {
   vscodeWs.on("message", (data: Buffer) => {
     try {
       const message = JSON.parse(data.toString());
-      
+
       // Relay codeContext messages to all connected web clients
-      if (message.type === 'codeContext') {
-        console.log('📨 Relaying codeContext message to web clients:', message.action);
+      if (message.type === "codeContext") {
+        console.log(
+          "📨 Relaying codeContext message to web clients:",
+          message.action
+        );
         clients.forEach((client) => {
           if (client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify(message));
           }
         });
+      }
+
+      // Relay Live Share events from VS Code extension to web clients
+      if (message.type === "liveshare-session-changed" || 
+          message.type === "liveshare-session-ended" ||
+          message.type === "liveshare-participants-changed" ||
+          message.type === "user-joined" ||
+          message.type === "user-left") {
+        console.log(
+          "📨 Relaying Live Share event to web clients:",
+          message.type
+        );
+        clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(message));
+          }
+        });
+      }
+
+      // Relay file viewer updates from VSCode extension to other VSCode extensions
+      if (message.type === "file-viewer-update") {
+        const { userId, filePath, action } = message;
+        console.log(
+          "📨 File viewer update:",
+          userId,
+          action,
+          filePath
+        );
+        
+        // Update user's current file
+        if (userId && connectedUsers.has(userId)) {
+          const userData = connectedUsers.get(userId)!;
+          if (action === "open") {
+            userData.currentFile = filePath;
+            console.log(`📂 ${userData.name} is now viewing: ${filePath}`);
+          } else if (action === "close" && userData.currentFile === filePath) {
+            userData.currentFile = undefined;
+            console.log(`📂 ${userData.name} closed: ${filePath}`);
+          }
+          
+          // Broadcast updated user list to all clients
+          const allUsers = Array.from(connectedUsers.values()).map(u => ({
+            id: u.id,
+            name: u.name,
+            email: u.email,
+            image: u.image,
+            color: u.color,
+            role: u.role,
+            currentFile: u.currentFile,
+            isYou: false, // Will be set by each client
+          }));
+          
+          clients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({
+                type: "presence-update",
+                users: allUsers,
+                timestamp: Date.now(),
+              }));
+            }
+          });
+        }
+        
+        // Also send to VSCode extension for decorations
+        if (vscodeWs && vscodeWs.readyState === WebSocket.OPEN) {
+          vscodeWs.send(JSON.stringify(message));
+        }
       }
     } catch (error) {
       // Ignore parsing errors
@@ -80,9 +150,9 @@ function connectToVSCodeExtension() {
     vscodeWsReady = false;
     vscodeWs = null;
     // Retry connection after 2 seconds
-   if (!IS_AGENT_MODE) {
-    setTimeout(connectToVSCodeExtension, 2000);
-   }
+    if (!IS_AGENT_MODE) {
+      setTimeout(connectToVSCodeExtension, 2000);
+    }
   });
 
   vscodeWs.on("error", (error) => {
@@ -158,7 +228,10 @@ interface Command {
     | "fileDiff"
     | "headFile"
     | "tailFile"
-    | "findDuplicates";
+    | "findDuplicates"
+    | "startLiveShare"
+    | "endLiveShare"
+    | "showLiveSharePanel";
   payload: any;
 }
 
@@ -185,6 +258,121 @@ const MAX_LOGS = 1000; // Keep last 1000 logs
 
 // Store connected clients for broadcasting
 const clients = new Set<WebSocket>();
+
+// Track user presence data (userId -> user info)
+const connectedUsers = new Map<string, {
+  id: string;
+  name: string;
+  email: string;
+  image?: string;
+  color: string;
+  role: string;
+  currentFile?: string; // Track what file the user is viewing
+  connections: Set<WebSocket>; // Track all connections for this user
+}>();
+
+// Live Share session tracking
+let liveShareActive = false;
+
+// Chat messages (in-memory, cleared when session ends)
+const chatMessages: any[] = [];
+
+// Auto-manage Live Share based on unique user count
+async function autoManageLiveShare() {
+  const uniqueUserCount = connectedUsers.size;
+  
+  console.log(`👥 Unique users: ${uniqueUserCount}, Live Share active: ${liveShareActive}`);
+  console.log(`👥 Connected users:`, Array.from(connectedUsers.values()).map(u => u.name));
+  
+  // Auto-start Live Share when we have 2+ unique users
+  if (uniqueUserCount >= 2 && !liveShareActive) {
+    console.log("🚀 Auto-starting Live Share - multiple clients detected");
+    try {
+      const result = await sendToVSCodeExtension({
+        id: `auto-liveshare-start-${Date.now()}`,
+        type: "startLiveShare",
+        payload: {},
+      });
+      
+      if (result) {
+        liveShareActive = true;
+        console.log("✅ Live Share auto-started successfully");
+        
+        // Broadcast Live Share started event to all clients
+        const message = JSON.stringify({
+          type: "liveshare-auto-started",
+          shareLink: result.shareLink || null,
+          timestamp: Date.now(),
+        });
+        clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+          }
+        });
+
+        // Get and broadcast initial participants
+        setTimeout(async () => {
+          try {
+            const participantsResult = await sendToVSCodeExtension({
+              id: `get-participants-${Date.now()}`,
+              type: "getLiveShareParticipants",
+              payload: {},
+            });
+            
+            if (participantsResult && participantsResult.participants) {
+              const participantsMessage = JSON.stringify({
+                type: "liveshare-participants-changed",
+                participants: participantsResult.participants,
+                timestamp: Date.now(),
+              });
+              clients.forEach((client) => {
+                if (client.readyState === WebSocket.OPEN) {
+                  client.send(participantsMessage);
+                }
+              });
+            }
+          } catch (error) {
+            console.error("❌ Failed to get initial Live Share participants:", error);
+          }
+        }, 2000); // Wait 2 seconds for Live Share to fully initialize
+      }
+    } catch (error) {
+      console.error("❌ Failed to auto-start Live Share:", error);
+    }
+  }
+  
+  // Auto-end Live Share when we have less than 2 unique users
+  else if (uniqueUserCount < 2 && liveShareActive) {
+    console.log("🛑 Auto-ending Live Share - not enough unique users for collaboration");
+    try {
+      await sendToVSCodeExtension({
+        id: `auto-liveshare-end-${Date.now()}`,
+        type: "endLiveShare",
+        payload: {},
+      });
+      
+      liveShareActive = false;
+      console.log("✅ Live Share auto-ended successfully");
+      
+      // Clear chat messages
+      chatMessages.length = 0;
+      console.log("🗑️ Chat messages cleared");
+      
+      // Broadcast Live Share ended event to all clients
+      const message = JSON.stringify({
+        type: "liveshare-auto-ended",
+        timestamp: Date.now(),
+      });
+      clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(message);
+        }
+      });
+    } catch (error) {
+      console.error("❌ Failed to auto-end Live Share:", error);
+    }
+  }
+}
 
 // Helper to broadcast errors to all clients
 function broadcastError(error: LogEntry) {
@@ -217,29 +405,240 @@ console.log(`🌉 Agent Bridge WebSocket Server starting on port ${PORT}`);
 wss.on("connection", (ws: WebSocket) => {
   console.log("✅ New agent connection established");
   clients.add(ws);
+  console.log(`👥 Total clients connected: ${clients.size}`);
+  
+  // Check if we should auto-start Live Share
+  setTimeout(() => autoManageLiveShare(), 1000); // Small delay to ensure connection is stable
 
   // Set up ping/pong heartbeat to keep connection alive
   let isAlive = true;
-  
-  ws.on('pong', () => {
+
+  ws.on("pong", () => {
+    console.log("🏓 Received native WebSocket pong from client");
     isAlive = true;
   });
 
   const heartbeatInterval = setInterval(() => {
     if (!isAlive) {
-      console.log("💔 Client didn't respond to ping, terminating connection");
+      console.log("💔 Client didn't respond to ping/pong, terminating connection");
       clearInterval(heartbeatInterval);
       ws.terminate();
       return;
     }
-    
+
+    console.log("🏓 Sending native WebSocket ping to client");
     isAlive = false;
     ws.ping();
   }, 30000); // Ping every 30 seconds
 
   ws.on("message", async (data: Buffer) => {
     try {
-      const command: Command = JSON.parse(data.toString());
+      const message = JSON.parse(data.toString());
+
+      // Handle ping/pong for keepalive
+      if (message.type === "ping") {
+        console.log("🏓 Received JSON ping from client, sending pong");
+        isAlive = true; // Reset alive flag for both JSON and native ping/pong
+        ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
+        return;
+      }
+
+      // Handle presence updates (broadcast to all clients)
+      if (message.type === "presence-update") {
+        console.log(`👤 Presence update from: ${message.user?.name}`);
+
+        // Broadcast to all connected clients
+        clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(
+              JSON.stringify({
+                type: "presence-update",
+                users: message.users,
+                timestamp: Date.now(),
+              })
+            );
+          }
+        });
+
+        // Acknowledge to sender
+        ws.send(
+          JSON.stringify({
+            success: true,
+            type: "presence-ack",
+          })
+        );
+        return;
+      }
+
+      // Handle presence join
+      if (message.type === "presence-join") {
+        const user = message.user;
+        console.log(`👋 User joined: ${user?.name} (${user?.id})`);
+
+        // Track this user
+        if (user && user.id) {
+          if (!connectedUsers.has(user.id)) {
+            connectedUsers.set(user.id, {
+              id: user.id,
+              name: user.name || "Anonymous",
+              email: user.email || "",
+              image: user.image,
+              color: user.color || "#3b82f6",
+              role: user.role || "guest",
+              connections: new Set([ws]),
+            });
+            console.log(`✅ New user tracked: ${user.name} (total unique users: ${connectedUsers.size})`);
+            
+            // Send user info to VSCode extension for file tracking
+            if (vscodeWs && vscodeWs.readyState === WebSocket.OPEN) {
+              vscodeWs.send(JSON.stringify({
+                type: 'set-user-info',
+                userId: user.id,
+                userName: user.name,
+                userColor: user.color,
+              }));
+              console.log(`📤 Sent user info to VSCode extension: ${user.name}`);
+            }
+            
+            // If Live Share is already active, notify the new user
+            if (liveShareActive) {
+              console.log(`📡 Live Share already active, notifying new user: ${user.name}`);
+              ws.send(JSON.stringify({
+                type: "liveshare-already-active",
+                message: "A Live Share session is already active",
+                timestamp: Date.now(),
+              }));
+              
+              // Get current Live Share info from VSCode extension
+              if (vscodeWs && vscodeWs.readyState === WebSocket.OPEN) {
+                sendToVSCodeExtension({
+                  id: `get-liveshare-info-${Date.now()}`,
+                  type: "getLiveShareParticipants",
+                  payload: {},
+                }).then((result) => {
+                  if (result && result.participants) {
+                    ws.send(JSON.stringify({
+                      type: "liveshare-participants-changed",
+                      participants: result.participants,
+                      timestamp: Date.now(),
+                    }));
+                  }
+                }).catch((error) => {
+                  console.error("❌ Failed to get Live Share info for new user:", error);
+                });
+              }
+            }
+            
+            // Check if we should auto-start Live Share
+            setTimeout(() => autoManageLiveShare(), 500);
+          } else {
+            // Add this connection to existing user
+            const userData = connectedUsers.get(user.id)!;
+            userData.connections.add(ws);
+            console.log(`✅ Additional connection for user: ${user.name} (connections: ${userData.connections.size})`);
+          }
+        }
+
+        // Send current user list to the new user
+        const allUsers = Array.from(connectedUsers.values()).map(u => ({
+          id: u.id,
+          name: u.name,
+          email: u.email,
+          image: u.image,
+          color: u.color,
+          role: u.role,
+          currentFile: u.currentFile,
+          isYou: u.id === user.id,
+        }));
+        
+        ws.send(JSON.stringify({
+          type: "presence-update",
+          users: allUsers,
+          timestamp: Date.now(),
+        }));
+        console.log(`📤 Sent current user list to ${user.name}: ${allUsers.length} users`);
+
+        // Broadcast to all other clients that a new user joined
+        clients.forEach((client) => {
+          if (client !== ws && client.readyState === WebSocket.OPEN) {
+            client.send(
+              JSON.stringify({
+                type: "user-joined",
+                user: message.user,
+                timestamp: Date.now(),
+              })
+            );
+          }
+        });
+
+        ws.send(JSON.stringify({ success: true }));
+        return;
+      }
+
+      // Handle presence leave
+      if (message.type === "presence-leave") {
+        const user = message.user;
+        console.log(`👋 User left: ${user?.name} (${user?.id})`);
+
+        // Remove this connection from user tracking
+        if (user && user.id && connectedUsers.has(user.id)) {
+          const userData = connectedUsers.get(user.id)!;
+          userData.connections.delete(ws);
+          
+          // If user has no more connections, remove them completely
+          if (userData.connections.size === 0) {
+            connectedUsers.delete(user.id);
+            console.log(`✅ User fully disconnected: ${user.name} (remaining unique users: ${connectedUsers.size})`);
+            
+            // Check if we should auto-end Live Share
+            setTimeout(() => autoManageLiveShare(), 500);
+          } else {
+            console.log(`✅ Connection removed for user: ${user.name} (remaining connections: ${userData.connections.size})`);
+          }
+        }
+
+        // Broadcast to all other clients
+        clients.forEach((client) => {
+          if (client !== ws && client.readyState === WebSocket.OPEN) {
+            client.send(
+              JSON.stringify({
+                type: "user-left",
+                user: message.user,
+                timestamp: Date.now(),
+              })
+            );
+          }
+        });
+
+        ws.send(JSON.stringify({ success: true }));
+        return;
+      }
+
+      // Handle chat messages
+      if (message.type === "chat-message") {
+        const chatMessage = message.data;
+        console.log(`💬 Chat message from ${chatMessage.userName}: ${chatMessage.message}`);
+        
+        // Store in memory
+        chatMessages.push(chatMessage);
+        
+        // Broadcast to all other clients
+        clients.forEach((client) => {
+          if (client !== ws && client.readyState === WebSocket.OPEN) {
+            client.send(
+              JSON.stringify({
+                type: "chat-message",
+                data: chatMessage,
+              })
+            );
+          }
+        });
+        
+        return;
+      }
+
+      // Handle regular commands
+      const command: Command = message as Command;
       console.log(`📨 Received command: ${command.type}`);
 
       const response = await handleCommand(command);
@@ -259,6 +658,22 @@ wss.on("connection", (ws: WebSocket) => {
     console.log("🔌 Agent connection closed");
     clearInterval(heartbeatInterval);
     clients.delete(ws);
+    
+    // Clean up user tracking - remove this connection from all users
+    for (const [userId, userData] of connectedUsers.entries()) {
+      if (userData.connections.has(ws)) {
+        userData.connections.delete(ws);
+        
+        // If user has no more connections, remove them completely
+        if (userData.connections.size === 0) {
+          connectedUsers.delete(userId);
+          console.log(`✅ User auto-disconnected on close: ${userData.name} (remaining unique users: ${connectedUsers.size})`);
+        }
+      }
+    }
+    
+    // Check if we should auto-end Live Share
+    setTimeout(() => autoManageLiveShare(), 500); // Small delay to ensure cleanup is complete
   });
 
   ws.on("error", (error) => {
@@ -827,9 +1242,24 @@ async function handleCommand(command: Command): Promise<Response> {
         }
       }
 
+      case "showLiveSharePanel": {
+        console.log("📡 Opening VS Code Live Share panel");
+        try {
+          const data = await sendToVSCodeExtension({
+            id: command.id,
+            type: "showLiveSharePanel",
+            payload: command.payload,
+          });
+          return { id: command.id, success: true, data };
+        } catch (error: any) {
+          return { id: command.id, success: false, error: error.message };
+        }
+      }
+
       // ========== Advanced Search and Inspection Tools ==========
       case "grepInFile": {
-        const { path, pattern, caseInsensitive, contextLines } = command.payload;
+        const { path, pattern, caseInsensitive, contextLines } =
+          command.payload;
         const filePath = sanitizePath(path);
         console.log(`🔍 Grep in file: ${pattern} in ${filePath}`);
 
@@ -840,7 +1270,7 @@ async function handleCommand(command: Command): Promise<Response> {
 
           const caseFlag = caseInsensitive ? "-i" : "";
           const contextFlag = contextLines > 0 ? `-C ${contextLines}` : "";
-          
+
           const { stdout } = await execAsync(
             `grep -n ${caseFlag} ${contextFlag} "${pattern}" "${filePath}" || true`,
             {
@@ -873,18 +1303,28 @@ async function handleCommand(command: Command): Promise<Response> {
       }
 
       case "grepInDirectory": {
-        const { path: dirPath, pattern, filePattern, caseInsensitive, maxResults = 100 } = command.payload;
+        const {
+          path: dirPath,
+          pattern,
+          filePattern,
+          caseInsensitive,
+          maxResults = 100,
+        } = command.payload;
         const fullPath = sanitizePath(dirPath || ".");
         console.log(`🔍 Grep in directory: ${pattern} in ${fullPath}`);
 
         try {
           if (!existsSync(fullPath)) {
-            return { id: command.id, success: false, error: "Directory not found" };
+            return {
+              id: command.id,
+              success: false,
+              error: "Directory not found",
+            };
           }
 
           const caseFlag = caseInsensitive ? "-i" : "";
           const includeFlag = filePattern ? `--include="${filePattern}"` : "";
-          
+
           const { stdout } = await execAsync(
             `grep -rn ${caseFlag} ${includeFlag} "${pattern}" "${fullPath}" 2>/dev/null | head -n ${maxResults} || true`,
             {
@@ -932,7 +1372,9 @@ async function handleCommand(command: Command): Promise<Response> {
           const isDirectory = stats.stdout.trim().includes("directory");
 
           if (isDirectory) {
-            const findPattern = filePattern ? `-name "${filePattern}"` : "-type f";
+            const findPattern = filePattern
+              ? `-name "${filePattern}"`
+              : "-type f";
             const { stdout } = await execAsync(
               `find "${fullPath}" ${findPattern} -exec wc -l {} + 2>/dev/null || echo "0"`,
               {
@@ -945,7 +1387,10 @@ async function handleCommand(command: Command): Promise<Response> {
             const files = lines.slice(0, -1).map((line) => {
               const parts = line.trim().split(/\s+/);
               const count = parseInt(parts[0]);
-              const file = parts.slice(1).join(" ").replace(fullPath + "/", "");
+              const file = parts
+                .slice(1)
+                .join(" ")
+                .replace(fullPath + "/", "");
               return { file, lines: count };
             });
 
@@ -985,10 +1430,18 @@ async function handleCommand(command: Command): Promise<Response> {
 
         try {
           if (!existsSync(fullPath1)) {
-            return { id: command.id, success: false, error: `File not found: ${file1}` };
+            return {
+              id: command.id,
+              success: false,
+              error: `File not found: ${file1}`,
+            };
           }
           if (!existsSync(fullPath2)) {
-            return { id: command.id, success: false, error: `File not found: ${file2}` };
+            return {
+              id: command.id,
+              success: false,
+              error: `File not found: ${file2}`,
+            };
           }
 
           const diffFlag = unified ? "-u" : "";
@@ -1003,7 +1456,12 @@ async function handleCommand(command: Command): Promise<Response> {
           return {
             id: command.id,
             success: true,
-            data: { file1, file2, diff: stdout, hasDifferences: stdout.length > 0 },
+            data: {
+              file1,
+              file2,
+              diff: stdout,
+              hasDifferences: stdout.length > 0,
+            },
           };
         } catch (error: any) {
           return { id: command.id, success: false, error: error.message };
@@ -1067,10 +1525,16 @@ async function handleCommand(command: Command): Promise<Response> {
 
         try {
           if (!existsSync(fullPath)) {
-            return { id: command.id, success: false, error: "Directory not found" };
+            return {
+              id: command.id,
+              success: false,
+              error: "Directory not found",
+            };
           }
 
-          const findPattern = filePattern ? `-name "${filePattern}"` : "-type f";
+          const findPattern = filePattern
+            ? `-name "${filePattern}"`
+            : "-type f";
           const { stdout } = await execAsync(
             `find "${fullPath}" ${findPattern} -type f -exec md5sum {} + 2>/dev/null || true`,
             {
@@ -1080,14 +1544,17 @@ async function handleCommand(command: Command): Promise<Response> {
           );
 
           const hashMap = new Map<string, string[]>();
-          
+
           stdout.split("\n").forEach((line) => {
             if (!line.trim()) return;
             const parts = line.trim().split(/\s+/);
             if (parts.length >= 2) {
               const hash = parts[0];
-              const file = parts.slice(1).join(" ").replace(fullPath + "/", "");
-              
+              const file = parts
+                .slice(1)
+                .join(" ")
+                .replace(fullPath + "/", "");
+
               if (!hashMap.has(hash)) {
                 hashMap.set(hash, []);
               }
@@ -1106,7 +1573,10 @@ async function handleCommand(command: Command): Promise<Response> {
               path: dirPath,
               duplicates,
               duplicateCount: duplicates.length,
-              totalDuplicateFiles: duplicates.reduce((sum, d) => sum + d.count, 0),
+              totalDuplicateFiles: duplicates.reduce(
+                (sum, d) => sum + d.count,
+                0
+              ),
             },
           };
         } catch (error: any) {
@@ -1228,18 +1698,25 @@ const httpServer = createServer(async (req, res) => {
 
       // Execute agent task - events are published to Redis automatically
       console.log(`🎯 Starting agent execution...`);
-      
+
       try {
         // Execute the task (it's an async generator, must iterate through it)
         console.log(`🔄 Consuming execute() generator...`);
         let chunkCount = 0;
         for await (const chunk of agentExecutor.execute(task)) {
           chunkCount++;
-          console.log(`📦 [Server] Received chunk ${chunkCount}: "${chunk.substring(0, 50)}${chunk.length > 50 ? '...' : ''}"`);
+          console.log(
+            `📦 [Server] Received chunk ${chunkCount}: "${chunk.substring(
+              0,
+              50
+            )}${chunk.length > 50 ? "..." : ""}"`
+          );
           // Chunks are already published to Redis by the executor
         }
-        console.log(`✅ [Server] Generator completed, received ${chunkCount} chunks`);
-        
+        console.log(
+          `✅ [Server] Generator completed, received ${chunkCount} chunks`
+        );
+
         const state = agentExecutor.getState();
         console.log(`✅ Agent execution completed:`, {
           toolCalls: state.toolCallsCount,
@@ -1248,13 +1725,15 @@ const httpServer = createServer(async (req, res) => {
 
         // Return success response
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ 
-          success: true,
-          state: {
-            toolCallsCount: state.toolCallsCount,
-            filesEditedCount: state.filesEdited.length
-          }
-        }));
+        res.end(
+          JSON.stringify({
+            success: true,
+            state: {
+              toolCallsCount: state.toolCallsCount,
+              filesEditedCount: state.filesEdited.length,
+            },
+          })
+        );
       } catch (error: any) {
         console.error(`❌ Agent execution error:`, error);
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -1350,6 +1829,30 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  // POST /command - Send command to VS Code extension (used by Live Share API)
+  if (url.pathname === "/command" && req.method === "POST") {
+    try {
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk;
+      }
+
+      const command = JSON.parse(body);
+      console.log(`📨 Received command for VS Code extension:`, command.type);
+
+      // Send command to VS Code extension via WebSocket
+      const result = await sendToVSCodeExtension(command);
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, data: result }));
+    } catch (error: any) {
+      console.error("Error in /command:", error);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: error.message }));
+    }
+    return;
+  }
+
   // POST /vscode-command - Send command to VS Code extension
   if (url.pathname === "/vscode-command" && req.method === "POST") {
     try {
@@ -1405,6 +1908,8 @@ httpServer.listen(PORT, () => {
     POST /agent/execute - Start agent execution
     POST /agent/chat - Continue conversation
     GET  /agent/status - Get agent status
+    POST /command - Send command to VS Code extension
+    POST /vscode-command - Send command to VS Code extension (legacy)
     GET  /health - Health check`);
 });
 

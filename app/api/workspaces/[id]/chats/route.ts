@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 import { prisma } from "@/lib/db";
 
 // GET /api/workspaces/:id/chats - Get all chats for a workspace
@@ -16,19 +17,45 @@ export async function GET(
 
     const { id: workspaceId } = await context.params;
 
-    // Verify workspace belongs to user
-    const workspace = await prisma.workspace.findFirst({
+    // First check if workspace belongs directly to user
+    let workspace = await prisma.workspace.findFirst({
       where: {
         id: workspaceId,
         userId: session.user.id,
       },
     });
 
+    // If not found by direct ownership, check if it's a team workspace and user is a member
     if (!workspace) {
-      return NextResponse.json(
-        { error: "Workspace not found" },
-        { status: 404 }
-      );
+      // Find the workspace first
+      const teamWorkspace = await prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        include: { team: true },
+      });
+
+      if (!teamWorkspace || !teamWorkspace.teamId) {
+        return NextResponse.json(
+          { error: "Workspace not found" },
+          { status: 404 }
+        );
+      }
+
+      // Check if user is a member of the team
+      const teamMembership = await prisma.teamMember.findFirst({
+        where: {
+          teamId: teamWorkspace.teamId,
+          userId: session.user.id,
+        },
+      });
+
+      if (!teamMembership) {
+        return NextResponse.json(
+          { error: "You are not authorized to access this workspace" },
+          { status: 403 }
+        );
+      }
+      
+      workspace = teamWorkspace;
     }
 
     // Get all chats for this workspace
@@ -88,19 +115,45 @@ export async function POST(
 
     const { id: workspaceId } = await context.params;
 
-    // Verify workspace belongs to user
-    const workspace = await prisma.workspace.findFirst({
+    // First check if workspace belongs directly to user
+    let workspace = await prisma.workspace.findFirst({
       where: {
         id: workspaceId,
         userId: session.user.id,
       },
     });
 
+    // If not found by direct ownership, check if it's a team workspace and user is a member
     if (!workspace) {
-      return NextResponse.json(
-        { error: "Workspace not found" },
-        { status: 404 }
-      );
+      // Find the workspace first
+      const teamWorkspace = await prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        include: { team: true },
+      });
+
+      if (!teamWorkspace || !teamWorkspace.teamId) {
+        return NextResponse.json(
+          { error: "Workspace not found" },
+          { status: 404 }
+        );
+      }
+
+      // Check if user is a member of the team
+      const teamMembership = await prisma.teamMember.findFirst({
+        where: {
+          teamId: teamWorkspace.teamId,
+          userId: session.user.id,
+        },
+      });
+
+      if (!teamMembership) {
+        return NextResponse.json(
+          { error: "You are not authorized to access this workspace" },
+          { status: 403 }
+        );
+      }
+      
+      workspace = teamWorkspace;
     }
 
     const body = await request.json();

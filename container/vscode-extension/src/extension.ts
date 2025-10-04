@@ -8,6 +8,7 @@ import { getSelectedCodeContext, formatCodeContext, formatCodeWithInstruction, c
 import { registerSelectionMenu, setWebUIMessageSender } from "./selection-menu";
 import { registerBrowserPanel } from "./browser-panel";
 import { LiveShareMonitor } from "./liveshare-monitor";
+import { FileViewerDecorator } from "./file-viewer-decorator";
 
 // Create output channel for logging
 const outputChannel = vscode.window.createOutputChannel("Kalpana");
@@ -51,7 +52,8 @@ interface VSCodeCommand {
     | "getCheckpointDiff"
     | "startLiveShare"
     | "endLiveShare"
-    | "getLiveShareParticipants";
+    | "getLiveShareParticipants"
+    | "showLiveSharePanel";
   payload: any;
 }
 
@@ -91,12 +93,29 @@ export function activate(context: vscode.ExtensionContext) {
   
   context.subscriptions.push(completionDisposable);
   console.log("✅ Autocomplete provider registered");
-
+  
   // ========== Initialize Live Share Monitor ==========
   const liveShareMonitor = new LiveShareMonitor();
 
+  // ========== Initialize File Viewer Decorator ==========
+  const fileViewerDecorator = new FileViewerDecorator();
+  context.subscriptions.push(
+    vscode.window.registerFileDecorationProvider(fileViewerDecorator)
+  );
+  console.log("✅ File viewer decorator registered");
+
+  // Track all users by userId (since multiple users share the same VSCode instance)
+  const connectedUsers = new Map<string, {
+    userId: string;
+    userName: string;
+    userColor: string;
+    lastActiveFile: string | null;
+  }>();
+
   // ========== WebSocket Server for Direct Communication ==========
   let wss: WebSocketServer;
+  let agentBridgeWs: WebSocket | null = null; // Track agent-bridge connection
+  
   try {
     wss = new WebSocketServer({ port: WS_PORT, host: "0.0.0.0" });
     console.log(
@@ -121,10 +140,77 @@ export function activate(context: vscode.ExtensionContext) {
 
   wss.on("connection", (ws: WebSocket) => {
     console.log("✅ Agent bridge connected to VS Code extension");
+    agentBridgeWs = ws; // Store the agent-bridge connection
 
     ws.on("message", async (data: Buffer) => {
       try {
-        const command: VSCodeCommand = JSON.parse(data.toString());
+        const message = JSON.parse(data.toString());
+        
+        // Handle user info (sent from agent-bridge when user joins)
+        if (message.type === "set-user-info") {
+          const { userId, userName, userColor } = message;
+          
+          // Add or update user in the map
+          connectedUsers.set(userId, {
+            userId,
+            userName,
+            userColor,
+            lastActiveFile: null,
+          });
+          
+          outputChannel.appendLine(`👤 User added: ${userName} (${userId}). Total users: ${connectedUsers.size}`);
+          
+          // Send current file if one is open (for the first user who joins)
+          const activeEditor = vscode.window.activeTextEditor;
+          if (activeEditor && agentBridgeWs && agentBridgeWs.readyState === WebSocket.OPEN) {
+            const filePath = activeEditor.document.uri.fsPath;
+            connectedUsers.get(userId)!.lastActiveFile = filePath;
+            
+            agentBridgeWs.send(JSON.stringify({
+              type: 'file-viewer-update',
+              userId,
+              userName,
+              userColor,
+              filePath,
+              action: 'open',
+            }));
+            outputChannel.appendLine(`👁️ Initial file for ${userName}: ${filePath}`);
+          }
+          return;
+        }
+        
+        // Handle file viewer updates from other users
+        if (message.type === "file-viewer-update") {
+          const { userId, userName, userColor, filePath, action } = message;
+          
+          if (action === "open") {
+            fileViewerDecorator.addViewer(filePath, { userId, userName, userColor, filePath });
+            outputChannel.appendLine(`👁️ ${userName} opened ${filePath}`);
+          } else if (action === "close") {
+            fileViewerDecorator.removeViewer(filePath, userId);
+            outputChannel.appendLine(`👁️ ${userName} closed ${filePath}`);
+          }
+          return;
+        }
+        
+        // Handle user disconnection - remove from all files
+        if (message.type === "user-disconnected") {
+          const { userId } = message;
+          
+          // Remove user from connected users map
+          if (connectedUsers.has(userId)) {
+            const userData = connectedUsers.get(userId)!;
+            connectedUsers.delete(userId);
+            outputChannel.appendLine(`👁️ User ${userData.userName} disconnected. Remaining users: ${connectedUsers.size}`);
+          }
+          
+          // Remove from file decorations
+          fileViewerDecorator.removeUserFromAllFiles(userId);
+          return;
+        }
+        
+        // Handle regular commands
+        const command: VSCodeCommand = message as VSCodeCommand;
         const response = await handleCommand(command);
         ws.send(JSON.stringify(response));
       } catch (error: any) {
@@ -141,6 +227,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     ws.on("close", () => {
       console.log("❌ Agent bridge disconnected from VS Code extension");
+      agentBridgeWs = null; // Clear the connection
     });
 
     ws.on("error", (error) => {
@@ -428,6 +515,25 @@ export function activate(context: vscode.ExtensionContext) {
             success: true,
             data: { participants, count: participants.length },
           };
+        }
+
+        case "showLiveSharePanel": {
+          console.log('📡 Opening Live Share panel in VS Code...');
+          try {
+            // Execute the registered command to show Live Share panel
+            await vscode.commands.executeCommand('kalpana.showLiveSharePanel');
+            return {
+              id: command.id,
+              success: true,
+              data: { message: 'Live Share panel opened' },
+            };
+          } catch (error: any) {
+            return {
+              id: command.id,
+              success: false,
+              error: error.message,
+            };
+          }
         }
 
         default:
@@ -1018,52 +1124,50 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(generateCommitCmd, closeEditorsCommand);
 
   // ========== Code Selection Context Commands ==========
-  // Create WebSocket message sender for code context
+  // Create WebSocket message sender for code context (sends through agent-bridge)
   let sendToWebUI: ((message: any) => Promise<void>) | null = null;
-  let connectedClients: Set<WebSocket> = new Set();
 
   // ========== Initialize Live Share Event Broadcasting ==========
   liveShareMonitor.initialize().then((success) => {
     if (success) {
       outputChannel.appendLine('✅ Live Share monitoring enabled');
       
-      // Broadcast Live Share events to all connected clients
+      // Broadcast Live Share events through agent-bridge
       liveShareMonitor.onEvent((event) => {
         outputChannel.appendLine(`📡 Broadcasting Live Share event: ${event.type}`);
-        connectedClients.forEach((client) => {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify(event));
-          }
-        });
+        if (agentBridgeWs && agentBridgeWs.readyState === WebSocket.OPEN) {
+          agentBridgeWs.send(JSON.stringify(event));
+        }
       });
     } else {
       outputChannel.appendLine('⚠️ Live Share monitoring not available (extension may not be installed)');
     }
   });
 
-  // Track all connected WebSocket clients
-  wss.on('connection', (ws: WebSocket) => {
-    connectedClients.add(ws);
-    sendToWebUI = createWebUIMessageSender(ws);
-    setWebUIMessageSender(sendToWebUI);
-    
-    outputChannel.appendLine(`📡 WebSocket client connected, total clients: ${connectedClients.size}`);
-
-    ws.on('close', () => {
-      connectedClients.delete(ws);
-      outputChannel.appendLine(`📡 WebSocket client disconnected, remaining: ${connectedClients.size}`);
-      
-      // Update sendToWebUI to use another client if available
-      if (connectedClients.size > 0) {
-        const nextClient = Array.from(connectedClients)[0];
-        sendToWebUI = createWebUIMessageSender(nextClient);
-        setWebUIMessageSender(sendToWebUI);
+  // Create message sender that uses agent-bridge connection
+  const createAgentBridgeMessageSender = () => {
+    return async (message: any) => {
+      if (agentBridgeWs && agentBridgeWs.readyState === WebSocket.OPEN) {
+        agentBridgeWs.send(JSON.stringify(message));
       } else {
-        sendToWebUI = null;
-        setWebUIMessageSender(null);
+        throw new Error('Agent bridge not connected');
       }
-    });
-  });
+    };
+  };
+
+  // Update sendToWebUI whenever agent-bridge connects
+  const updateWebUIMessageSender = () => {
+    if (agentBridgeWs && agentBridgeWs.readyState === WebSocket.OPEN) {
+      sendToWebUI = createAgentBridgeMessageSender();
+      setWebUIMessageSender(sendToWebUI);
+    } else {
+      sendToWebUI = null;
+      setWebUIMessageSender(null);
+    }
+  };
+
+  // Set up initial sender
+  updateWebUIMessageSender();
 
   // Register selection menu (floating buttons)
   registerSelectionMenu(context, sendToWebUI);
@@ -1078,26 +1182,22 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      // Get the current sendToWebUI (might have changed)
-      if (connectedClients.size === 0) {
+      // Check if agent-bridge is connected
+      if (!agentBridgeWs || agentBridgeWs.readyState !== WebSocket.OPEN) {
         vscode.window.showWarningMessage('Web UI not connected');
         return;
       }
 
-      // Send to all connected clients
+      // Send through agent-bridge (which forwards to Web UI)
       const message = {
         type: 'codeContext',
         action: 'addToChat',
         payload: context,
       };
 
-      outputChannel.appendLine(`📤 Sending to web UI: ${JSON.stringify(message)}`);
+      outputChannel.appendLine(`📤 Sending to web UI via agent-bridge: ${JSON.stringify(message)}`);
 
-      for (const client of connectedClients) {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify(message));
-        }
-      }
+      agentBridgeWs.send(JSON.stringify(message));
 
       vscode.window.showInformationMessage('💬 Code added to chat context');
     }
@@ -1113,7 +1213,8 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      if (connectedClients.size === 0) {
+      // Check if agent-bridge is connected
+      if (!agentBridgeWs || agentBridgeWs.readyState !== WebSocket.OPEN) {
         vscode.window.showWarningMessage('Web UI not connected');
         return;
       }
@@ -1137,19 +1238,83 @@ export function activate(context: vscode.ExtensionContext) {
         },
       };
 
-      outputChannel.appendLine(`📤 Sending to web UI: ${JSON.stringify(message)}`);
+      outputChannel.appendLine(`📤 Sending to web UI via agent-bridge: ${JSON.stringify(message)}`);
 
-      for (const client of connectedClients) {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify(message));
-        }
-      }
+      agentBridgeWs.send(JSON.stringify(message));
 
       vscode.window.showInformationMessage('✨ Sent to Kalpana Agent');
     }
   );
 
-  context.subscriptions.push(addToChatCmd, sendToAgentCmd);
+  // Show Live Share panel command
+  const showLiveSharePanelCmd = vscode.commands.registerCommand(
+    'kalpana.showLiveSharePanel',
+    async () => {
+      try {
+        // Show Live Share view in VS Code
+        await vscode.commands.executeCommand('liveshare.focus');
+        vscode.window.showInformationMessage('📡 Live Share panel opened');
+      } catch (error) {
+        // Fallback: show Live Share commands
+        try {
+          await vscode.commands.executeCommand('workbench.view.extension.liveshare');
+        } catch (fallbackError) {
+          vscode.window.showWarningMessage('Live Share extension not available');
+        }
+      }
+    }
+  );
+
+  context.subscriptions.push(addToChatCmd, sendToAgentCmd, showLiveSharePanelCmd);
+
+  // ========== Track Active File Changes ==========
+  const activeEditorChanged = vscode.window.onDidChangeActiveTextEditor((editor: vscode.TextEditor | undefined) => {
+    if (!agentBridgeWs || agentBridgeWs.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    if (connectedUsers.size === 0) {
+      return; // No users connected yet
+    }
+
+    const newFile = editor?.document.uri.fsPath || null;
+
+    // Send file updates for ALL connected users
+    for (const [userId, userData] of connectedUsers.entries()) {
+      const oldFile = userData.lastActiveFile;
+
+      // Send close event for previous file
+      if (oldFile && oldFile !== newFile) {
+        agentBridgeWs.send(JSON.stringify({
+          type: 'file-viewer-update',
+          userId: userData.userId,
+          userName: userData.userName,
+          userColor: userData.userColor,
+          filePath: oldFile,
+          action: 'close',
+        }));
+        outputChannel.appendLine(`👁️ ${userData.userName} closed ${oldFile}`);
+      }
+
+      // Send open event for new file
+      if (newFile) {
+        agentBridgeWs.send(JSON.stringify({
+          type: 'file-viewer-update',
+          userId: userData.userId,
+          userName: userData.userName,
+          userColor: userData.userColor,
+          filePath: newFile,
+          action: 'open',
+        }));
+        outputChannel.appendLine(`👁️ ${userData.userName} opened ${newFile}`);
+      }
+
+      // Update the user's last active file
+      userData.lastActiveFile = newFile;
+    }
+  });
+
+  context.subscriptions.push(activeEditorChanged);
 
   // Cleanup
   context.subscriptions.push({

@@ -17,23 +17,59 @@ export async function GET(
 
     const { id } = await context.params;
 
+    // First check if workspace belongs directly to user
     const workspace = await prisma.workspace.findFirst({
       where: {
         id,
         userId: session.user.id,
       },
+      include: {
+        team: true,
+      },
     });
 
+    // If not found by direct ownership, check if it's a team workspace and user is a member
     if (!workspace) {
-      return NextResponse.json(
-        { error: "Workspace not found" },
-        { status: 404 }
-      );
+      // Find the workspace first
+      const teamWorkspace = await prisma.workspace.findUnique({
+        where: { id },
+        include: { team: true },
+      });
+
+      if (!teamWorkspace || !teamWorkspace.teamId) {
+        return NextResponse.json(
+          { error: "Workspace not found" },
+          { status: 404 }
+        );
+      }
+
+      // Check if user is a member of the team that owns this workspace
+      const teamMembership = await prisma.teamMember.findFirst({
+        where: {
+          teamId: teamWorkspace.teamId,
+          userId: session.user.id,
+        },
+      });
+
+      if (!teamMembership) {
+        return NextResponse.json(
+          { error: "You are not authorized to access this workspace" },
+          { status: 403 }
+        );
+      }
+
+      // Update last accessed
+      await prisma.workspace.update({
+        where: { id },
+        data: { lastAccessedAt: new Date() },
+      });
+
+      return NextResponse.json(teamWorkspace);
     }
 
     // Update last accessed
     await prisma.workspace.update({
-      where: { id: workspace.id },
+      where: { id: workspace!.id },
       data: { lastAccessedAt: new Date() },
     });
 
@@ -61,18 +97,46 @@ export async function DELETE(
 
     const { id } = await context.params;
 
-    const workspace = await prisma.workspace.findFirst({
+    // First check if workspace belongs directly to user
+    let workspace = await prisma.workspace.findFirst({
       where: {
         id,
         userId: session.user.id,
       },
     });
 
+    // If not found by direct ownership, check if it's a team workspace and user has permission
     if (!workspace) {
-      return NextResponse.json(
-        { error: "Workspace not found" },
-        { status: 404 }
-      );
+      // Find the workspace first
+      const teamWorkspace = await prisma.workspace.findUnique({
+        where: { id },
+        include: { team: true },
+      });
+
+      if (!teamWorkspace || !teamWorkspace.teamId) {
+        return NextResponse.json(
+          { error: "Workspace not found" },
+          { status: 404 }
+        );
+      }
+
+      // Check if user is an admin or owner of the team
+      const teamMembership = await prisma.teamMember.findFirst({
+        where: {
+          teamId: teamWorkspace.teamId,
+          userId: session.user.id,
+          role: { in: ["OWNER", "ADMIN"] }, // Only owners and admins can delete
+        },
+      });
+
+      if (!teamMembership) {
+        return NextResponse.json(
+          { error: "You don't have permission to delete this workspace" },
+          { status: 403 }
+        );
+      }
+      
+      workspace = teamWorkspace;
     }
 
     // Check if user wants to delete volume (permanent data deletion)
@@ -126,18 +190,46 @@ export async function PATCH(
 
     const { id } = await context.params;
 
-    const workspace = await prisma.workspace.findFirst({
+    // First check if workspace belongs directly to user
+    let workspace = await prisma.workspace.findFirst({
       where: {
         id,
         userId: session.user.id,
       },
     });
 
+    // If not found by direct ownership, check if it's a team workspace and user has permission
     if (!workspace) {
-      return NextResponse.json(
-        { error: "Workspace not found" },
-        { status: 404 }
-      );
+      // Find the workspace first
+      const teamWorkspace = await prisma.workspace.findUnique({
+        where: { id },
+        include: { team: true },
+      });
+
+      if (!teamWorkspace || !teamWorkspace.teamId) {
+        return NextResponse.json(
+          { error: "Workspace not found" },
+          { status: 404 }
+        );
+      }
+
+      // Check if user is an admin or owner of the team (for updates)
+      const teamMembership = await prisma.teamMember.findFirst({
+        where: {
+          teamId: teamWorkspace.teamId,
+          userId: session.user.id,
+          role: { in: ["OWNER", "ADMIN"] }, // Only owners and admins can update
+        },
+      });
+
+      if (!teamMembership) {
+        return NextResponse.json(
+          { error: "You don't have permission to update this workspace" },
+          { status: 403 }
+        );
+      }
+      
+      workspace = teamWorkspace;
     }
 
     const body = await req.json();

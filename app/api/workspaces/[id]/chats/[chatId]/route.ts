@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 import { prisma } from "@/lib/db";
 
 // GET /api/workspaces/:id/chats/:chatId - Get a specific chat

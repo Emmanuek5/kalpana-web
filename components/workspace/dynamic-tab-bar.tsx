@@ -2,7 +2,6 @@
 
 import React, { useMemo, useState } from 'react';
 import { MoreHorizontal } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
 
 export interface DynamicTab {
   id: string;
@@ -50,34 +49,35 @@ export function DynamicTabBar({
   }, [tabs, activeTabId, maxVisible]);
 
   return (
-    <div className="flex border-b border-zinc-800 bg-zinc-950/50">
-      {/* Visible Tabs */}
-      {visibleTabs.map((tab) => (
-        <TabButton
-          key={tab.id}
-          tab={tab}
-          isActive={tab.id === activeTabId}
-          onClick={() => onTabChange(tab.id)}
-        />
-      ))}
+    <div className="flex flex-col">
+      {/* Top Tabs Bar */}
+      <div className="flex border-b border-white/10 bg-[#0f0f0f] relative">
+        {/* Bottom shadow for depth */}
+        <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-black/50 to-transparent" />
+        
+        {/* Visible Tabs */}
+        {visibleTabs.map((tab) => (
+          <TabButton
+            key={tab.id}
+            tab={tab}
+            isActive={tab.id === activeTabId}
+            onClick={() => onTabChange(tab.id)}
+          />
+        ))}
+      </div>
 
-      {/* Overflow Menu */}
+      {/* Overflow Tabs Footer - Docked at bottom */}
       {overflowTabs.length > 0 && (
-        <OverflowMenu
+        <OverflowFooter
           tabs={overflowTabs}
-          isOpen={overflowOpen}
-          onToggle={() => setOverflowOpen(!overflowOpen)}
-          onSelect={(tabId) => {
-            onTabChange(tabId);
-            setOverflowOpen(false);
-          }}
+          onSelect={(tabId) => onTabChange(tabId)}
         />
       )}
     </div>
   );
 }
 
-// Tab Button Component
+// Tab Button Component with Depth
 function TabButton({
   tab,
   isActive,
@@ -93,29 +93,45 @@ function TabButton({
     <button
       onClick={onClick}
       className={`
-        flex-1 px-4 py-3 text-sm font-medium transition-colors relative
+        flex-1 px-4 py-3 text-sm font-medium relative transition-all duration-200 rounded-s-md
         ${
           isActive
-            ? 'text-emerald-400 border-b-2 border-emerald-500'
-            : 'text-zinc-500 hover:text-zinc-300'
+            ? `
+              text-emerald-400 
+              bg-[#242424]
+              border-b-2 border-emerald-500
+              shadow-[0_2px_4px_0_rgba(0,0,0,0.3)]
+              [box-shadow:inset_0_1px_0_0_rgba(255,255,255,0.05)]
+            `
+            : `
+              text-zinc-500 
+              hover:text-zinc-300 
+              hover:bg-white/5
+              border-b-2 border-transparent
+            `
         }
       `}
     >
-      <div className="flex items-center justify-center gap-2">
+      {/* Top highlight for active tab */}
+      {isActive && (
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+      )}
+      
+      <div className="flex items-center justify-center gap-2 relative z-10">
         <Icon className="h-4 w-4" />
         <span>{tab.label}</span>
 
-        {/* Badge */}
+        {/* Badge with elevation */}
         {tab.badge && (
-          <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded-full bg-emerald-500/20 text-emerald-400 font-bold">
+          <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded-full bg-emerald-500/20 text-emerald-400 font-bold shadow-[0_1px_2px_0_rgba(0,0,0,0.2)]">
             {tab.badge}
           </span>
         )}
 
-        {/* Pulse Indicator */}
+        {/* Pulse Indicator with glow */}
         {tab.pulseColor && (
           <span
-            className="h-2 w-2 rounded-full animate-pulse"
+            className="h-2 w-2 rounded-full animate-pulse shadow-[0_0_8px_2px_rgba(16,185,129,0.4)]"
             style={{ backgroundColor: tab.pulseColor }}
           />
         )}
@@ -124,71 +140,66 @@ function TabButton({
   );
 }
 
-// Overflow Menu Component
-function OverflowMenu({
+// Overflow Footer Component - Docked at bottom showing tab names
+function OverflowFooter({
   tabs,
-  isOpen,
-  onToggle,
   onSelect,
 }: {
   tabs: DynamicTab[];
-  isOpen: boolean;
-  onToggle: () => void;
   onSelect: (tabId: string) => void;
 }) {
-  // Check if any overflow tab has a badge
-  const hasBadge = tabs.some((t) => t.badge);
-
   return (
-    <div className="relative">
-      <button
-        onClick={onToggle}
-        className="px-3 py-3 text-zinc-500 hover:text-zinc-300 transition-colors relative"
-        title="More tabs"
-      >
-        <MoreHorizontal className="h-4 w-4" />
-        {hasBadge && (
-          <span className="absolute top-2 right-2 h-2 w-2 rounded-full bg-emerald-500" />
-        )}
-      </button>
-
-      {isOpen && (
-        <>
-          {/* Backdrop */}
-          <div
-            className="fixed inset-0 z-40"
-            onClick={onToggle}
-          />
-
-          {/* Dropdown Menu */}
-          <div className="absolute top-full right-0 mt-1 w-48 bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl z-50 overflow-hidden">
-            {tabs.map((tab) => {
-              const Icon = tab.icon;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => onSelect(tab.id)}
-                  className="w-full px-4 py-2.5 flex items-center gap-3 hover:bg-zinc-800 transition-colors text-left"
-                >
-                  <Icon className="h-4 w-4 text-zinc-400" />
-                  <span className="text-sm text-zinc-300 flex-1">{tab.label}</span>
-                  {tab.badge && (
-                    <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-emerald-500/20 text-emerald-400 font-bold">
-                      {tab.badge}
-                    </span>
-                  )}
-                  {tab.pulseColor && (
-                    <span
-                      className="h-2 w-2 rounded-full animate-pulse"
-                      style={{ backgroundColor: tab.pulseColor }}
-                    />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </>
-      )}
+    <div className="border-t border-white/10 bg-[#0f0f0f] relative">
+      {/* Top highlight for depth */}
+      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+      
+      <div className="px-4 py-2 flex items-center gap-3 overflow-x-auto scrollbar-thin">
+        <span className="text-[10px] text-zinc-600 uppercase tracking-wide font-medium shrink-0">
+          More:
+        </span>
+        
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => onSelect(tab.id)}
+              className="
+                flex items-center gap-2 px-3 py-1.5 
+                bg-[#1a1a1a] 
+                border border-white/10 
+                rounded-lg 
+                text-xs text-zinc-400 
+                hover:text-emerald-400 
+                hover:border-emerald-500/30
+                hover:bg-[#242424]
+                transition-all duration-200
+                shadow-[0_1px_2px_0_rgba(0,0,0,0.2)]
+                hover:shadow-[0_2px_4px_0_rgba(0,0,0,0.3)]
+                [box-shadow:inset_0_1px_0_0_rgba(255,255,255,0.03)]
+                shrink-0
+                group
+              "
+            >
+              <Icon className="h-3.5 w-3.5 group-hover:text-emerald-400 transition-colors" />
+              <span className="font-medium">{tab.label}</span>
+              
+              {tab.badge && (
+                <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-emerald-500/20 text-emerald-400 font-bold shadow-[0_1px_2px_0_rgba(0,0,0,0.2)]">
+                  {tab.badge}
+                </span>
+              )}
+              
+              {tab.pulseColor && (
+                <span
+                  className="h-2 w-2 rounded-full animate-pulse shadow-[0_0_8px_2px_rgba(16,185,129,0.4)]"
+                  style={{ backgroundColor: tab.pulseColor }}
+                />
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

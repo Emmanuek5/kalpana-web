@@ -2,6 +2,9 @@ import { prisma } from "@/lib/db";
 import net from "net";
 import Docker from "dockerode";
 
+
+
+const UNASSINGABLE_PORTS = [3002, 3003];
 export class PortManager {
   private minPort: number;
   private maxPort: number;

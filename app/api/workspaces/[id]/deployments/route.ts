@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 import { headers } from "next/headers";
 import { prisma } from "@/lib/db";
 import { deploymentManager } from "@/lib/docker/deployment-manager";
@@ -20,19 +21,14 @@ export async function GET(
   const { id: workspaceId } = await params;
 
   // Verify workspace ownership
-  const workspace = await prisma.workspace.findFirst({
-    where: {
-      id: workspaceId,
-      userId: session.user.id,
-    },
-  });
-
-  if (!workspace) {
-    return NextResponse.json(
-      { error: "Workspace not found" },
-      { status: 404 }
-    );
-  }
+  // Verify user has access to this workspace
+    const workspace = await authorizeWorkspaceAccess(workspaceId, session.user.id);
+    if (!workspace) {
+      return NextResponse.json(
+        { error: "You are not authorized to access this workspace" },
+        { status: 403 }
+      );
+    }
 
   // Get all deployments for this workspace
   const deployments = await prisma.deployment.findMany({
@@ -65,19 +61,14 @@ export async function POST(
   const { id: workspaceId } = await params;
 
   // Verify workspace ownership
-  const workspace = await prisma.workspace.findFirst({
-    where: {
-      id: workspaceId,
-      userId: session.user.id,
-    },
-  });
-
-  if (!workspace) {
-    return NextResponse.json(
-      { error: "Workspace not found" },
-      { status: 404 }
-    );
-  }
+  // Verify user has access to this workspace
+    const workspace = await authorizeWorkspaceAccess(workspaceId, session.user.id);
+    if (!workspace) {
+      return NextResponse.json(
+        { error: "You are not authorized to access this workspace" },
+        { status: 403 }
+      );
+    }
 
   try {
     const body = await request.json();

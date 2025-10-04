@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 import { checkpointService } from "@/lib/checkpoint-service";
 
 // POST /api/workspaces/:id/checkpoints/:checkpointId/restore - Restore a checkpoint

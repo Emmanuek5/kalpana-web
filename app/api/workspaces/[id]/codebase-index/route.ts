@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { auth } from "@/lib/auth";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 import { prisma } from "@/lib/db";
 import { dockerManager } from "@/lib/docker/manager";
 
@@ -16,15 +17,39 @@ export async function GET(
 
     const { id } = await context.params;
 
-    const workspace = await prisma.workspace.findFirst({
+    // First check if workspace belongs directly to user
+    let workspace = await prisma.workspace.findFirst({
       where: {
         id,
         userId: session.user.id,
       },
     });
 
+    // If not found by direct ownership, check if it's a team workspace and user is a member
     if (!workspace) {
-      return new Response("Workspace not found", { status: 404 });
+      // Find the workspace first
+      const teamWorkspace = await prisma.workspace.findUnique({
+        where: { id },
+        include: { team: true },
+      });
+
+      if (!teamWorkspace || !teamWorkspace.teamId) {
+        return new Response("Workspace not found", { status: 404 });
+      }
+
+      // Check if user is a member of the team
+      const teamMembership = await prisma.teamMember.findFirst({
+        where: {
+          teamId: teamWorkspace.teamId,
+          userId: session.user.id,
+        },
+      });
+
+      if (!teamMembership) {
+        return new Response("You are not authorized to access this workspace", { status: 403 });
+      }
+      
+      workspace = teamWorkspace;
     }
 
     if (workspace.status !== "RUNNING" || !workspace.containerId) {
@@ -147,15 +172,39 @@ export async function POST(
 
     const { id } = await context.params;
 
-    const workspace = await prisma.workspace.findFirst({
+    // First check if workspace belongs directly to user
+    let workspace = await prisma.workspace.findFirst({
       where: {
         id,
         userId: session.user.id,
       },
     });
 
+    // If not found by direct ownership, check if it's a team workspace and user is a member
     if (!workspace) {
-      return new Response("Workspace not found", { status: 404 });
+      // Find the workspace first
+      const teamWorkspace = await prisma.workspace.findUnique({
+        where: { id },
+        include: { team: true },
+      });
+
+      if (!teamWorkspace || !teamWorkspace.teamId) {
+        return new Response("Workspace not found", { status: 404 });
+      }
+
+      // Check if user is a member of the team
+      const teamMembership = await prisma.teamMember.findFirst({
+        where: {
+          teamId: teamWorkspace.teamId,
+          userId: session.user.id,
+        },
+      });
+
+      if (!teamMembership) {
+        return new Response("You are not authorized to access this workspace", { status: 403 });
+      }
+      
+      workspace = teamWorkspace;
     }
 
     if (workspace.status !== "RUNNING" || !workspace.containerId) {

@@ -10,6 +10,8 @@ export const auth = betterAuth({
 
   advanced: {
     generateId: () => new ObjectId().toString(),
+    // Handle existing users on OAuth login
+    useSecureCookies: process.env.NODE_ENV === "production",
   },
 
   emailAndPassword: {
@@ -22,6 +24,8 @@ export const auth = betterAuth({
       clientId: process.env.GITHUB_CLIENT_ID!,
       clientSecret: process.env.GITHUB_CLIENT_SECRET!,
       scope: ["read:user", "repo"],
+      // Link existing accounts with same email
+      allowDangerousEmailAccountLinking: true,
     },
   },
 

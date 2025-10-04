@@ -36,7 +36,10 @@ import { WorkspaceEditor } from "@/components/workspace/workspace-editor";
 import { AIAgentPanel } from "@/components/workspace/ai-agent-panel";
 import { DiagnosticsDialog } from "@/components/workspace/diagnostics-dialog";
 import { DeploymentsPanel } from "@/components/workspace/deployments-panel";
-import { DynamicTabBar, type DynamicTab } from "@/components/workspace/dynamic-tab-bar";
+import {
+  DynamicTabBar,
+  type DynamicTab,
+} from "@/components/workspace/dynamic-tab-bar";
 import { LiveSharePanel } from "@/components/workspace/live-share-panel";
 
 // Custom scrollbar styles
@@ -144,19 +147,30 @@ export default function WorkspacePage({
   const [rebuildStage, setRebuildStage] = useState<string>("");
   const [inputMessage, setInputMessage] = useState<string>("");
   const [activeTab, setActiveTab] = React.useState<string>("ai");
-  
+
   // Live Share state
   const [liveShareActive, setLiveShareActive] = useState(false);
   const [liveShareLink, setLiveShareLink] = useState<string | null>(null);
   const [collaboratorCount, setCollaboratorCount] = useState(0);
-  
+
+  // Presence tracking (WebSocket-based)
+  const [activeViewers, setActiveViewers] = useState<any[]>([]);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const presenceUpdateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const hasJoinedPresenceRef = useRef<boolean>(false);
+  const presenceSetupDoneRef = useRef<boolean>(false); // Track if presence is already set up
+  const myPresenceRef = useRef<any>(null); // Store presence data to avoid recreating
+  const currentFileRef = useRef<string | null>(null); // Track current file
+
   // Chat management state
-  const [chats, setChats] = useState<Array<{
-    id: string;
-    title: string;
-    messageCount: number;
-    lastMessageAt: Date;
-  }>>([]);
+  const [chats, setChats] = useState<
+    Array<{
+      id: string;
+      title: string;
+      messageCount: number;
+      lastMessageAt: Date;
+    }>
+  >([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
 
   // Handler for opening files in editor
@@ -169,20 +183,23 @@ export default function WorkspacePage({
 
     try {
       // Send WebSocket message to open file in VS Code
-      const response = await fetch(`http://localhost:${workspace.agentPort}/vscode-command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'openFile',
-          payload: {
-            filePath: path,
-            line: lineNumber,
-          },
-        }),
-      });
+      const response = await fetch(
+        `http://localhost:${workspace.agentPort}/vscode-command`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "openFile",
+            payload: {
+              filePath: path,
+              line: lineNumber,
+            },
+          }),
+        }
+      );
 
       if (!response.ok) {
-        console.error('Failed to open file:', await response.text());
+        console.error("Failed to open file:", await response.text());
       }
     } catch (error) {
       console.error("Error opening file:", error);
@@ -193,13 +210,14 @@ export default function WorkspacePage({
   const renderTextWithFileLinks = (text: string) => {
     const parts: React.ReactNode[] = [];
     let lastIndex = 0;
-    
+
     // Enhanced regex to match:
     // 1. @mentions: @filename or @function()
     // 2. File paths with keywords: File: path/to/file.ts or Path: src/app.tsx
     // 3. Backtick file paths: `src/components/Button.tsx` or `app/page.tsx:42`
     // 4. Common file patterns: src/file.ts, app/page.tsx, lib/utils.ts
-    const combinedRegex = /@([\w\-./()]+)|(?:File|Path|file|path):\s*([^\s,;]+)|`([^`]+\.[a-z]{2,4}(?::\d+)?)`|(?:^|\s)((?:src|app|lib|components|pages|api|utils|hooks|styles|public|container|docs|prisma|scripts)\/[\w\-./]+\.[a-z]{2,4}(?::\d+)?)/gi;
+    const combinedRegex =
+      /@([\w\-./()]+)|(?:File|Path|file|path):\s*([^\s,;]+)|`([^`]+\.[a-z]{2,4}(?::\d+)?)`|(?:^|\s)((?:src|app|lib|components|pages|api|utils|hooks|styles|public|container|docs|prisma|scripts)\/[\w\-./]+\.[a-z]{2,4}(?::\d+)?)/gi;
     let match;
 
     while ((match = combinedRegex.exec(text)) !== null) {
@@ -262,7 +280,7 @@ export default function WorkspacePage({
     const interval = setInterval(fetchWorkspace, 5000);
     return () => clearInterval(interval);
   }, [resolvedParams.id]);
-  
+
   // Fetch messages when chat changes
   useEffect(() => {
     if (currentChatId) {
@@ -339,7 +357,7 @@ export default function WorkspacePage({
       if (res.ok) {
         const data = await res.json();
         setChats(data.chats || []);
-        
+
         // Select first chat or create new one if none exist
         if (data.chats && data.chats.length > 0) {
           setCurrentChatId(data.chats[0].id);
@@ -355,7 +373,9 @@ export default function WorkspacePage({
 
   const fetchMessages = async (chatId: string) => {
     try {
-      const res = await fetch(`/api/workspaces/${resolvedParams.id}/messages?chatId=${chatId}`);
+      const res = await fetch(
+        `/api/workspaces/${resolvedParams.id}/messages?chatId=${chatId}`
+      );
       if (res.ok) {
         const data = await res.json();
         setMessages(data.messages || []);
@@ -367,29 +387,32 @@ export default function WorkspacePage({
 
   const saveMessage = async (message: Message): Promise<string | null> => {
     if (!currentChatId) return null;
-    
+
     try {
-      const response = await fetch(`/api/workspaces/${resolvedParams.id}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chatId: currentChatId,
-          role: message.role,
-          parts: message.parts,
-        }),
-      });
-      
+      const response = await fetch(
+        `/api/workspaces/${resolvedParams.id}/messages`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chatId: currentChatId,
+            role: message.role,
+            parts: message.parts,
+          }),
+        }
+      );
+
       const data = await response.json();
-      
+
       // Auto-generate chat title from first user message
       if (message.role === "user" && messages.length === 0) {
-        const textPart = message.parts.find(p => p.type === "text") as any;
+        const textPart = message.parts.find((p) => p.type === "text") as any;
         if (textPart?.text) {
           const title = generateChatTitle(textPart.text);
           await updateChatTitle(currentChatId, title);
         }
       }
-      
+
       // Return the database-generated message ID
       return data.message?.id || null;
     } catch (error) {
@@ -397,16 +420,16 @@ export default function WorkspacePage({
       return null;
     }
   };
-  
+
   const generateChatTitle = (firstMessage: string): string => {
     // Take first 50 chars or until first newline
-    let title = firstMessage.split('\n')[0].substring(0, 50);
+    let title = firstMessage.split("\n")[0].substring(0, 50);
     if (firstMessage.length > 50) {
       title += "...";
     }
     return title || "New Chat";
   };
-  
+
   const updateChatTitle = async (chatId: string, title: string) => {
     try {
       await fetch(`/api/workspaces/${resolvedParams.id}/chats/${chatId}`, {
@@ -414,14 +437,14 @@ export default function WorkspacePage({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
       });
-      
+
       // Update local state
-      setChats(chats.map(c => c.id === chatId ? { ...c, title } : c));
+      setChats(chats.map((c) => (c.id === chatId ? { ...c, title } : c)));
     } catch (error) {
       console.error("Error updating chat title:", error);
     }
   };
-  
+
   const handleCreateChat = async () => {
     try {
       const res = await fetch(`/api/workspaces/${resolvedParams.id}/chats`, {
@@ -429,7 +452,7 @@ export default function WorkspacePage({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: "New Chat" }),
       });
-      
+
       if (res.ok) {
         const data = await res.json();
         setChats([data.chat, ...chats]);
@@ -440,7 +463,7 @@ export default function WorkspacePage({
       console.error("Error creating chat:", error);
     }
   };
-  
+
   const handleSelectChat = async (chatId: string) => {
     setCurrentChatId(chatId);
     // Messages will be fetched by useEffect
@@ -722,7 +745,7 @@ export default function WorkspacePage({
     try {
       // Create new AbortController for this request
       abortControllerRef.current = new AbortController();
-      
+
       const res = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -761,7 +784,7 @@ export default function WorkspacePage({
 
         for (const line of lines) {
           if (!line.trim() || line.startsWith(":")) continue;
-          
+
           if (line.startsWith("data: ")) {
             const dataStr = line.slice(6).trim();
             if (dataStr === "[DONE]" || !dataStr) continue;
@@ -770,7 +793,10 @@ export default function WorkspacePage({
               const data = JSON.parse(dataStr);
 
               // Handle text deltas (AI SDK v5 format)
-              if ((data.type === "text-delta" || data.type === "0") && data.textDelta) {
+              if (
+                (data.type === "text-delta" || data.type === "0") &&
+                data.textDelta
+              ) {
                 currentText += data.textDelta;
                 setMessages((prev) => {
                   const updated = [...prev];
@@ -842,7 +868,9 @@ export default function WorkspacePage({
 
                     if (!existingTool && data.toolCallId && data.toolName) {
                       // Add tool with "input-streaming" state to show it's executing
-                      console.log(`✅ Adding tool to message: ${data.toolName} (${data.toolCallId})`);
+                      console.log(
+                        `✅ Adding tool to message: ${data.toolName} (${data.toolCallId})`
+                      );
                       lastMsg.parts.push({
                         type: "tool",
                         toolCallId: data.toolCallId,
@@ -851,7 +879,10 @@ export default function WorkspacePage({
                         input: data.args || {},
                       });
                     } else {
-                      console.log(`⚠️ Tool already exists or missing data:`, { existingTool, data });
+                      console.log(`⚠️ Tool already exists or missing data:`, {
+                        existingTool,
+                        data,
+                      });
                     }
                   }
                   return updated;
@@ -875,7 +906,9 @@ export default function WorkspacePage({
                         (p as any).toolCallId === data.toolCallId
                     );
                     if (toolPart) {
-                      console.log(`✅ Updating tool result: ${toolPart.toolName} → output-available`);
+                      console.log(
+                        `✅ Updating tool result: ${toolPart.toolName} → output-available`
+                      );
                       toolPart.state = "output-available";
                       toolPart.output = data.result;
 
@@ -933,46 +966,58 @@ export default function WorkspacePage({
               if (data.type === "error" || data.type === "credits_error") {
                 console.error("Stream error:", data.error);
                 setIsStreaming(false);
-                
+
                 // Show toast for credits error
                 if (data.type === "credits_error" || data.isCreditsError) {
                   toast.error("Insufficient OpenRouter Credits", {
-                    description: "Please add more credits to continue using AI features.",
+                    description:
+                      "Please add more credits to continue using AI features.",
                     action: {
                       label: "Add Credits",
-                      onClick: () => window.open("https://openrouter.ai/settings/credits", "_blank"),
+                      onClick: () =>
+                        window.open(
+                          "https://openrouter.ai/settings/credits",
+                          "_blank"
+                        ),
                     },
                     duration: 10000,
                   });
-                  
+
                   // Also save to notification database
-                  fetch('/api/notifications', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                  fetch("/api/notifications", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                       type: "error",
                       title: "Insufficient OpenRouter Credits",
-                      message: "Please add more credits at https://openrouter.ai/settings/credits to continue using AI features.",
+                      message:
+                        "Please add more credits at https://openrouter.ai/settings/credits to continue using AI features.",
                       actionLabel: "Add Credits",
                       actionUrl: "https://openrouter.ai/settings/credits",
                       workspaceId: workspace?.id,
                     }),
-                  }).catch(err => console.error('Failed to save notification:', err));
+                  }).catch((err) =>
+                    console.error("Failed to save notification:", err)
+                  );
                 } else {
                   // Regular error toast
                   toast.error("Error", {
-                    description: data.error || "An error occurred during processing",
+                    description:
+                      data.error || "An error occurred during processing",
                   });
                 }
-                
+
                 setMessages((prev) => {
                   const updated = [...prev];
                   const lastMsg = updated[updated.length - 1];
                   if (lastMsg && lastMsg.role === "assistant") {
                     lastMsg.parts.push({
                       type: "checkpoint",
-                      title: data.isCreditsError ? "Insufficient Credits" : "Error occurred",
-                      description: data.error || "An error occurred during processing",
+                      title: data.isCreditsError
+                        ? "Insufficient Credits"
+                        : "Error occurred",
+                      description:
+                        data.error || "An error occurred during processing",
                       status: "error",
                     });
                   }
@@ -987,9 +1032,9 @@ export default function WorkspacePage({
       }
     } catch (error: any) {
       console.error("Error sending message:", error);
-      
+
       // Check if it was aborted
-      if (error.name === 'AbortError') {
+      if (error.name === "AbortError") {
         console.log("Request was aborted by user");
         setMessages((prev) => {
           const updated = [...prev];
@@ -1037,6 +1082,8 @@ export default function WorkspacePage({
   const reconnectTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
   const reconnectDelayRef = React.useRef(1000);
   const shouldReconnectRef = React.useRef(false);
+  const pongTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
+  const lastPongRef = React.useRef<number>(Date.now());
 
   const handleWorkspaceSocketMessage = React.useCallback(
     (event: MessageEvent) => {
@@ -1046,6 +1093,108 @@ export default function WorkspacePage({
         const data = JSON.parse(event.data as string);
         console.log("📦 Parsed message:", data);
 
+        // Handle pong response
+        if (data.type === "pong") {
+          console.log("🏓 Pong received");
+          lastPongRef.current = Date.now();
+
+          // Clear pong timeout
+          if (pongTimeoutRef.current) {
+            clearTimeout(pongTimeoutRef.current);
+            pongTimeoutRef.current = null;
+          }
+          return;
+        }
+
+        // Handle presence updates from other users
+        if (data.type === "presence-update") {
+          console.log("👥 Presence update received:", data.users);
+          const users = (data.users || []).map((u: any) => ({
+            ...u,
+            isYou: u.id === currentUser?.id, // Only mark current user as "You"
+          }));
+          setActiveViewers(users);
+          const newCollaboratorCount = Math.max(0, users.length - 1);
+          setCollaboratorCount(newCollaboratorCount);
+          return;
+        }
+
+        // Handle user joined
+        if (data.type === "user-joined") {
+          console.log("👋 User joined:", data.user);
+          setActiveViewers((prev) => {
+            if (prev.some((u) => u.id === data.user.id)) return prev;
+            // Mark isYou as false for other users
+            const userWithFlag = { ...data.user, isYou: false };
+            return [...prev, userWithFlag];
+          });
+          setCollaboratorCount((prev) => prev + 1);
+          return;
+        }
+
+        // Handle user left
+        if (data.type === "user-left") {
+          console.log("👋 User left:", data.user);
+          setActiveViewers((prev) => prev.filter((u) => u.id !== data.user.id));
+          setCollaboratorCount((prev) => Math.max(0, prev - 1));
+          return;
+        }
+
+        // Handle joining an already-active Live Share session
+        if (data.type === "liveshare-already-active") {
+          console.log("📡 Joined workspace with active Live Share session");
+          setLiveShareActive(true);
+          setActiveTab("liveshare"); // Auto-switch to Live Share tab
+          // Show notification
+          console.log("💡 Live Share session is active - you've been connected!");
+          return;
+        }
+
+        // Handle auto Live Share events from agent bridge
+        if (data.type === "liveshare-auto-started") {
+          console.log("🚀 Live Share auto-started by agent bridge");
+          setLiveShareActive(true);
+          setLiveShareLink(data.shareLink);
+          setActiveTab("liveshare"); // Auto-switch to Live Share tab
+          return;
+        }
+
+        if (data.type === "liveshare-auto-ended") {
+          console.log("🛑 Live Share auto-ended by agent bridge");
+          setLiveShareActive(false);
+          setLiveShareLink(null);
+          setActiveTab("ai"); // Switch back to AI tab
+          return;
+        }
+
+        // Handle Live Share events from VS Code extension
+        if (data.type === "liveshare-session-changed") {
+          console.log("🔄 Live Share session changed:", data.session);
+          if (data.session) {
+            setLiveShareActive(true);
+            // Update share link if available
+            if (data.session.shareLink) {
+              setLiveShareLink(data.session.shareLink);
+            }
+          }
+          return;
+        }
+
+        if (data.type === "liveshare-session-ended") {
+          console.log("🔄 Live Share session ended");
+          setLiveShareActive(false);
+          setLiveShareLink(null);
+          return;
+        }
+
+        if (data.type === "liveshare-participants-changed") {
+          console.log("👥 Live Share participants changed:", data.participants);
+          // We use our own presence system instead of VSCode Live Share participants
+          // The activeViewers are already managed by presence-join/leave/update events
+          // So we don't need to update them here
+          return;
+        }
+
         if (data.type === "codeContext") {
           const { action, payload } = data;
           console.log("🎯 Code context action:", action, payload);
@@ -1054,7 +1203,11 @@ export default function WorkspacePage({
             const context = `@${payload.filePath}:${payload.lineStart}-${payload.lineEnd}\n\n`;
 
             setInputMessage((prev) => {
-              console.log("✅ Adding code to input, current:", prev.length, "chars");
+              console.log(
+                "✅ Adding code to input, current:",
+                prev.length,
+                "chars"
+              );
               return prev + context;
             });
 
@@ -1120,23 +1273,45 @@ export default function WorkspacePage({
         let pingInterval: NodeJS.Timeout | null = null;
 
         ws.onopen = () => {
-          console.log(`Connected to VS Code extension WebSocket on port ${workspace.agentPort}`);
+          console.log(
+            `Connected to VS Code extension WebSocket on port ${workspace.agentPort}`
+          );
           reconnectDelayRef.current = 1000;
           if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
             reconnectTimeoutRef.current = null;
           }
 
-          // Start sending ping messages every 25 seconds to keep connection alive
+          // Reset presence join flag so it can be sent again on reconnect
+          hasJoinedPresenceRef.current = false;
+          console.log("🔄 Reset presence join flag for new connection");
+
+          // Start sending ping messages every 20 seconds to keep connection alive
           pingInterval = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
               try {
-                ws.send(JSON.stringify({ type: 'ping' }));
+                console.log("🏓 Sending ping...");
+                ws.send(JSON.stringify({ type: "ping" }));
+
+                // Set timeout for pong response (8 seconds)
+                pongTimeoutRef.current = setTimeout(() => {
+                  console.error("❌ Pong timeout - no response from server");
+                  const timeSinceLastPong = Date.now() - lastPongRef.current;
+                  console.error(`⏱️ Last pong was ${timeSinceLastPong}ms ago`);
+
+                  // If we haven't received a pong in 30 seconds, reconnect
+                  if (timeSinceLastPong > 30000) {
+                    console.error(
+                      "🔄 Forcing reconnection due to pong timeout"
+                    );
+                    ws.close();
+                  }
+                }, 8000);
               } catch (error) {
                 console.error("❌ Failed to send ping:", error);
               }
             }
-          }, 25000);
+          }, 20000);
         };
 
         ws.onmessage = handleWorkspaceSocketMessage;
@@ -1147,18 +1322,33 @@ export default function WorkspacePage({
             clearInterval(pingInterval);
             pingInterval = null;
           }
+          if (pongTimeoutRef.current) {
+            clearTimeout(pongTimeoutRef.current);
+            pongTimeoutRef.current = null;
+          }
           ws.close();
         };
 
         ws.onclose = (event) => {
+          console.warn(
+            "⚠️ WebSocket closed:",
+            event.code,
+            event.reason || "(no reason)"
+          );
+
           if (pingInterval) {
             clearInterval(pingInterval);
             pingInterval = null;
           }
+          if (pongTimeoutRef.current) {
+            clearTimeout(pongTimeoutRef.current);
+            pongTimeoutRef.current = null;
+          }
+
           if (!shouldReconnectRef.current) {
             return;
           }
-          console.warn("⚠️ WebSocket closed:", event.reason || event.code);
+
           scheduleReconnect();
         };
       } catch (error) {
@@ -1184,7 +1374,234 @@ export default function WorkspacePage({
       }
       wsRef.current = null;
     };
-  }, [workspace?.agentPort, handleWorkspaceSocketMessage]);
+  }, [workspace?.agentPort]); // Removed handleWorkspaceSocketMessage to prevent reconnection loop
+
+  // Fetch current user info for presence
+  React.useEffect(() => {
+    console.log("👤 Fetching current user for presence...");
+    const fetchCurrentUser = async () => {
+      try {
+        const res = await fetch("/api/auth/get-session");
+        console.log("👤 Session API response:", res.status, res.ok);
+        if (res.ok) {
+          const data = await res.json();
+          console.log("👤 Session data:", data);
+          if (data.user) {
+            const userData = {
+              id: data.user.id,
+              name: data.user.name || "Anonymous",
+              email: data.user.email,
+              image: data.user.image,
+            };
+            console.log("👤 Setting current user:", userData);
+            setCurrentUser(userData);
+          } else {
+            console.warn("⚠️ No user in session data");
+          }
+        } else {
+          console.error("❌ Session API failed:", res.status);
+        }
+      } catch (error) {
+        console.error("❌ Failed to fetch user info:", error);
+      }
+    };
+
+    fetchCurrentUser();
+  }, []);
+
+  // WebSocket-based presence tracking
+  React.useEffect(() => {
+    console.log("🔄 Presence useEffect running:", { 
+      hasCurrentUser: !!currentUser, 
+      currentUserId: currentUser?.id,
+      hasWorkspace: !!workspace,
+      workspaceId: workspace?.id,
+      alreadySetup: presenceSetupDoneRef.current
+    });
+    
+    if (!currentUser || !workspace) {
+      console.log("⚠️ Skipping presence setup - missing currentUser or workspace");
+      return;
+    }
+    
+    // Only set up presence once
+    if (presenceSetupDoneRef.current) {
+      console.log("⚠️ Presence already set up, skipping");
+      return;
+    }
+    
+    presenceSetupDoneRef.current = true;
+    console.log("✅ Setting up presence for user:", currentUser.name);
+
+    // Generate consistent color for user
+    const getUserColor = (userId: string) => {
+      const colors = [
+        "#3b82f6",
+        "#8b5cf6",
+        "#ec4899",
+        "#f59e0b",
+        "#10b981",
+        "#06b6d4",
+        "#f97316",
+      ];
+      let hash = 0;
+      for (let i = 0; i < userId.length; i++) {
+        hash = (hash << 5) - hash + userId.charCodeAt(i);
+      }
+      return colors[Math.abs(hash) % colors.length];
+    };
+
+    // Create presence object once and store in ref
+    if (!myPresenceRef.current) {
+      myPresenceRef.current = {
+        id: currentUser.id,
+        name: currentUser.name,
+        email: currentUser.email,
+        image: currentUser.image,
+        role: "guest", // Role will be determined by agent-bridge based on join order
+        color: getUserColor(currentUser.id),
+        isYou: true,
+      };
+    }
+    
+    const myPresence = myPresenceRef.current;
+
+    // Add self to active viewers if not already there
+    setActiveViewers((prev) => {
+      if (prev.some((u) => u.id === currentUser.id)) return prev;
+      return [myPresence, ...prev];
+    });
+
+    // Wait for WebSocket to be ready, then send join
+    const checkAndJoin = () => {
+      const ws = wsRef.current;
+      console.log("🔍 Checking presence join conditions:", {
+        hasWebSocket: !!ws,
+        wsReadyState: ws?.readyState,
+        wsOpen: ws?.readyState === WebSocket.OPEN,
+        alreadyJoined: hasJoinedPresenceRef.current,
+        userId: currentUser.id,
+        userName: currentUser.name,
+      });
+      
+      if (
+        ws &&
+        ws.readyState === WebSocket.OPEN &&
+        !hasJoinedPresenceRef.current
+      ) {
+        hasJoinedPresenceRef.current = true;
+        console.log("👋 Sending presence-join", myPresence);
+        ws.send(
+          JSON.stringify({
+            type: "presence-join",
+            user: myPresence,
+          })
+        );
+      }
+    };
+
+    // Check immediately
+    checkAndJoin();
+
+    // If not ready, check every 500ms until ready
+    const readyCheckInterval = setInterval(() => {
+      if (hasJoinedPresenceRef.current) {
+        clearInterval(readyCheckInterval);
+        return;
+      }
+      checkAndJoin();
+    }, 500);
+
+    // Send periodic heartbeat (every 30 seconds)
+    // Just to keep the connection alive - agent-bridge manages the user list
+    const heartbeatInterval = setInterval(() => {
+      const ws = wsRef.current;
+      if (
+        ws &&
+        ws.readyState === WebSocket.OPEN &&
+        hasJoinedPresenceRef.current
+      ) {
+        ws.send(
+          JSON.stringify({
+            type: "presence-heartbeat",
+            user: myPresence,
+            timestamp: Date.now(),
+          })
+        );
+      }
+    }, 30000);
+
+    // Cleanup on unmount
+    return () => {
+      clearInterval(readyCheckInterval);
+      clearInterval(heartbeatInterval);
+
+      // Send presence-leave message
+      const ws = wsRef.current;
+      if (
+        ws &&
+        ws.readyState === WebSocket.OPEN &&
+        hasJoinedPresenceRef.current
+      ) {
+        console.log("👋 Sending presence-leave on cleanup");
+        ws.send(
+          JSON.stringify({
+            type: "presence-leave",
+            user: myPresence,
+          })
+        );
+      }
+
+      hasJoinedPresenceRef.current = false;
+      presenceSetupDoneRef.current = false; // Reset so it can be set up again if needed
+      myPresenceRef.current = null; // Clear presence data
+    };
+  }, [currentUser?.id, workspace?.id]); // Only depend on IDs, not full objects
+
+  // Handle file changes from VSCode iframe
+  const handleFileChange = React.useCallback((filePath: string | null) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    if (!currentUser) {
+      return;
+    }
+
+    const oldFile = currentFileRef.current;
+
+    // Send close event for previous file
+    if (oldFile && oldFile !== filePath) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "file-viewer-update",
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userColor: currentUser.color || "#3b82f6",
+          filePath: oldFile,
+          action: "close",
+        })
+      );
+      console.log(`📂 Closed file: ${oldFile}`);
+    }
+
+    // Send open event for new file
+    if (filePath) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "file-viewer-update",
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userColor: currentUser.color || "#3b82f6",
+          filePath,
+          action: "open",
+        })
+      );
+      console.log(`📂 Opened file: ${filePath}`);
+    }
+
+    currentFileRef.current = filePath;
+  }, [currentUser]);
 
   const getToolDisplayName = (toolName: string): string => {
     const names: Record<string, string> = {
@@ -1251,23 +1668,26 @@ export default function WorkspacePage({
   // Live Share handlers
   const handleStartLiveShare = async () => {
     try {
-      const res = await fetch(`/api/workspaces/${resolvedParams.id}/liveshare`, {
-        method: 'POST',
-      });
-      
+      const res = await fetch(
+        `/api/workspaces/${resolvedParams.id}/liveshare`,
+        {
+          method: "POST",
+        }
+      );
+
       const data = await res.json();
-      
+
       if (data.success) {
         setLiveShareActive(true);
         setLiveShareLink(data.shareLink);
-        setActiveTab('liveshare'); // Auto-switch to Live Share tab
-        toast.success('Live Share started!', {
-          icon: '🎉',
-          description: 'Share the link with your team',
+        setActiveTab("liveshare"); // Auto-switch to Live Share tab
+        toast.success("Live Share started!", {
+          icon: "🎉",
+          description: "Share the link with your team",
         });
       }
     } catch (error: any) {
-      toast.error('Failed to start Live Share', {
+      toast.error("Failed to start Live Share", {
         description: error.message,
       });
     }
@@ -1276,16 +1696,16 @@ export default function WorkspacePage({
   const handleEndLiveShare = async () => {
     try {
       await fetch(`/api/workspaces/${resolvedParams.id}/liveshare`, {
-        method: 'DELETE',
+        method: "DELETE",
       });
-      
+
       setLiveShareActive(false);
       setLiveShareLink(null);
       setCollaboratorCount(0);
-      setActiveTab('ai'); // Switch back to AI tab
-      toast.info('Live Share ended');
+      setActiveTab("ai"); // Switch back to AI tab
+      toast.info("Live Share ended");
     } catch (error: any) {
-      toast.error('Failed to end Live Share');
+      toast.error("Failed to end Live Share");
     }
   };
 
@@ -1293,13 +1713,13 @@ export default function WorkspacePage({
   const tabs: DynamicTab[] = React.useMemo(() => {
     const allTabs: DynamicTab[] = [
       {
-        id: 'ai',
-        label: 'AI Agent',
+        id: "ai",
+        label: "AI Agent",
         icon: Brain,
         priority: 100,
         content: (
           <AIAgentPanel
-            workspaceId={workspace?.id || ''}
+            workspaceId={workspace?.id || ""}
             isWorkSpaceRunning={workspace?.status === "RUNNING"}
             messages={messages}
             input={inputMessage}
@@ -1318,35 +1738,38 @@ export default function WorkspacePage({
             onStopGeneration={handleStopGeneration}
             chats={chats}
             currentChatId={currentChatId}
-            currentChatTitle={chats.find(c => c.id === currentChatId)?.title || "New Chat"}
+            currentChatTitle={
+              chats.find((c) => c.id === currentChatId)?.title || "New Chat"
+            }
             onSelectChat={handleSelectChat}
             onCreateChat={handleCreateChat}
           />
         ),
       },
       {
-        id: 'deployments',
-        label: 'Deployments',
+        id: "deployments",
+        label: "Deployments",
         icon: Rocket,
         priority: 50,
-        content: <DeploymentsPanel workspaceId={workspace?.id || ''} />,
+        content: <DeploymentsPanel workspaceId={workspace?.id || ""} />,
       },
     ];
 
     // Add Live Share tab only when active
     if (liveShareActive) {
       allTabs.push({
-        id: 'liveshare',
-        label: 'Live Share',
+        id: "liveshare",
+        label: "Live Share",
         icon: Users,
         priority: 150, // Highest priority when active
         badge: collaboratorCount > 0 ? collaboratorCount : undefined,
-        pulseColor: '#10b981', // Emerald-500
+        pulseColor: "#10b981", // Emerald-500
         content: (
           <LiveSharePanel
-            workspaceId={workspace?.id || ''}
+            workspaceId={workspace?.id || ""}
             agentBridgeWs={wsRef.current}
             shareLink={liveShareLink}
+            activeUsers={activeViewers}
             onEndSession={handleEndLiveShare}
           />
         ),
@@ -1372,7 +1795,7 @@ export default function WorkspacePage({
   ]);
 
   // Get active tab content
-  const activeTabContent = tabs.find(t => t.id === activeTab)?.content;
+  const activeTabContent = tabs.find((t) => t.id === activeTab)?.content;
 
   if (loading) {
     return (
@@ -1384,7 +1807,6 @@ export default function WorkspacePage({
       </div>
     );
   }
-
 
   if (!workspace) {
     return (
@@ -1410,15 +1832,15 @@ export default function WorkspacePage({
     );
   }
 
-
-
   return (
     <>
       <style>{scrollbarStyles}</style>
-      <div className="h-screen bg-black flex flex-col overflow-hidden">
-        {/* Futuristic Background Effect */}
-        <div className="fixed inset-0 bg-gradient-to-br from-emerald-950/10 via-black to-black pointer-events-none" />
-        <div className="fixed inset-0 bg-[linear-gradient(to_right,#0a0a0a_1px,transparent_1px),linear-gradient(to_bottom,#0a0a0a_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_0%,#000_70%,transparent_110%)] pointer-events-none" />
+      <div className="h-screen bg-[#0a0a0a] flex flex-col overflow-hidden">
+        {/* Layer 0: Deep background with subtle glow */}
+        <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_top,rgba(16,185,129,0.08),transparent_50%)] pointer-events-none" />
+
+        {/* Layer 0.5: Mesh pattern for depth */}
+        <div className="fixed inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_0%,#000_70%,transparent_110%)] pointer-events-none" />
 
         {/* Header */}
         <WorkspaceHeader
@@ -1426,9 +1848,6 @@ export default function WorkspacePage({
           onStop={handleStop}
           onRestart={handleRestart}
           onShowDiagnostics={() => setShowDiagnostics(true)}
-          onStartLiveShare={handleStartLiveShare}
-          onEndLiveShare={handleEndLiveShare}
-          liveShareActive={liveShareActive}
           stopping={stopping}
           restarting={restarting}
         />
@@ -1440,10 +1859,13 @@ export default function WorkspacePage({
           workspaceId={workspace.id}
         />
 
-        {/* Main Content - Proper Flex Layout */
+        {/* Main Content - Layer 1 */}
         <div className="relative z-10 flex-1 flex overflow-hidden">
-          {/* Editor Area */}
-          <div className="flex-1 bg-gradient-to-br from-zinc-950 to-black">
+          {/* Editor Area - Layer 1: Main surface */}
+          <div className="flex-1 bg-[#0f0f0f] relative">
+            {/* Subtle top highlight */}
+            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/5 to-transparent" />
+
             <WorkspaceEditor
               workspace={workspace}
               starting={starting}
@@ -1451,11 +1873,15 @@ export default function WorkspacePage({
               rebuildStage={rebuildStage}
               rebuildLogs={rebuildLogs}
               onStart={handleStart}
+              onFileChange={handleFileChange}
             />
           </div>
 
-          {/* Right Panel with Dynamic Tabs */}
-          <div className="w-[500px] flex flex-col bg-black/40 border-l border-zinc-800">
+          {/* Right Panel - Layer 2: Elevated surface with depth */}
+          <div className="w-[500px] flex flex-col bg-[#1a1a1a] border-l border-white/10 shadow-[-4px_0_6px_-1px_rgba(0,0,0,0.3)] relative">
+            {/* Inset highlight for depth */}
+            <div className="absolute inset-y-0 left-0 w-px bg-gradient-to-b from-white/5 via-white/10 to-white/5" />
+
             {/* Dynamic Tab Bar */}
             <DynamicTabBar
               tabs={tabs}
@@ -1465,12 +1891,9 @@ export default function WorkspacePage({
             />
 
             {/* Active Tab Content */}
-            <div className="flex-1 overflow-hidden">
-              {activeTabContent}
-            </div>
+            <div className="flex-1 overflow-hidden">{activeTabContent}</div>
           </div>
         </div>
-}
       </div>
     </>
   );

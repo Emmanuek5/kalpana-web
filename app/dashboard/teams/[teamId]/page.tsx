@@ -347,6 +347,27 @@ export default function TeamSettingsPage() {
     setTimeout(() => setCopiedToken(null), 2000);
   };
 
+  const handleRemoveInvitation = async (invitationId: string) => {
+    if (!confirm("Are you sure you want to cancel this invitation?")) return;
+
+    try {
+      const res = await fetch(`/api/teams/${teamId}/invite?invitationId=${invitationId}`, {
+        method: "DELETE",
+      });
+
+      if (res.ok) {
+        await fetchInvitations();
+        toast.success("Invitation cancelled");
+      } else {
+        const error = await res.json();
+        toast.error(error.error || "Failed to cancel invitation");
+      }
+    } catch (error) {
+      console.error("Error cancelling invitation:", error);
+      toast.error("Failed to cancel invitation");
+    }
+  };
+
   const getRoleIcon = (role: string) => {
     switch (role) {
       case "OWNER":
@@ -747,24 +768,34 @@ export default function TeamSettingsPage() {
                           Invited by {invitation.inviter.name} · Role: {invitation.role}
                         </div>
                       </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => copyInviteLink(invitation.token)}
-                        className="border-zinc-700 hover:bg-zinc-800"
-                      >
-                        {copiedToken === invitation.token ? (
-                          <>
-                            <Check className="h-4 w-4 mr-2 text-emerald-500" />
-                            Copied
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="h-4 w-4 mr-2" />
-                            Copy Link
-                          </>
-                        )}
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => copyInviteLink(invitation.token)}
+                          className="border-zinc-700 hover:bg-zinc-800"
+                        >
+                          {copiedToken === invitation.token ? (
+                            <>
+                              <Check className="h-4 w-4 mr-2 text-emerald-500" />
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="h-4 w-4 mr-2" />
+                              Copy Link
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleRemoveInvitation(invitation.id)}
+                          className="text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>

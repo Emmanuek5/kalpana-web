@@ -149,15 +149,15 @@ export const NotificationBell = () => {
                             {formatDistanceToNow(notification.timestamp, { addSuffix: true })}
                           </span>
                           {(notification.actionLabel && notification.actionUrl) && (
-                            <button
+                            <a
+                              href={notification.actionUrl}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                window.open(notification.actionUrl!, "_blank");
                               }}
                               className="text-xs text-emerald-400 hover:text-emerald-300 font-medium"
                             >
                               {notification.actionLabel}
-                            </button>
+                            </a>
                           )}
                         </div>
                       </div>

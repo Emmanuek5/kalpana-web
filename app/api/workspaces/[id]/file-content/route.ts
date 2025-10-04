@@ -1,5 +1,6 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 import { prisma } from "@/lib/db";
 import { containerAPI } from "@/lib/container-api";
 
@@ -22,15 +23,10 @@ export async function GET(
       return new Response("File path is required", { status: 400 });
     }
 
-    const workspace = await prisma.workspace.findFirst({
-      where: {
-        id,
-        userId: session.user.id,
-      },
-    });
-
+    // Verify user has access to this workspace
+    const workspace = await authorizeWorkspaceAccess(id, session.user.id);
     if (!workspace) {
-      return new Response("Workspace not found", { status: 404 });
+      return new Response("You are not authorized to access this workspace", { status: 403 });
     }
 
     if (workspace.status !== "RUNNING") {

@@ -94,6 +94,20 @@ export async function POST(
       },
     });
 
+    // Create notification for the invited user if they exist
+    if (existingUser) {
+      await prisma.notification.create({
+        data: {
+          userId: existingUser.id,
+          type: "INFO",
+          title: "Team Invitation",
+          message: `${invitation.inviter.name || invitation.inviter.email} invited you to join ${invitation.team.name}`,
+          actionLabel: "View Invitation",
+          actionUrl: `/teams/invite/${token}`,
+        },
+      });
+    }
+
     // TODO: Send invitation email here
     // await sendInvitationEmail(email, invitation);
 
@@ -149,6 +163,56 @@ export async function GET(
     console.error("Error fetching invitations:", error);
     return NextResponse.json(
       { error: "Failed to fetch invitations" },
+      { status: 500 }
+    );
+  }
+}
+
+// DELETE /api/teams/[teamId]/invite - Cancel/remove a pending invitation
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: { teamId: string } }
+) {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { teamId } = params;
+    const { searchParams } = new URL(req.url);
+    const invitationId = searchParams.get("invitationId");
+
+    if (!invitationId) {
+      return NextResponse.json(
+        { error: "Invitation ID is required" },
+        { status: 400 }
+      );
+    }
+
+    // Check if requester is owner or admin
+    const member = await prisma.teamMember.findFirst({
+      where: { teamId, userId: session.user.id },
+    });
+
+    if (!member || (member.role !== "OWNER" && member.role !== "ADMIN")) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    // Delete the invitation
+    await prisma.teamInvitation.delete({
+      where: {
+        id: invitationId,
+        teamId, // Ensure invitation belongs to this team
+      },
+    });
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Error deleting invitation:", error);
+    return NextResponse.json(
+      { error: "Failed to delete invitation" },
       { status: 500 }
     );
   }

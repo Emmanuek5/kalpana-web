@@ -1,7 +1,8 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { dockerManager } from "@/lib/docker/manager";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 import Docker from "dockerode";
 
 // Background monitoring function that runs independently of client connection
@@ -178,15 +179,13 @@ export async function POST(
 
     const { id } = await context.params;
 
-    const workspace = await prisma.workspace.findFirst({
-      where: {
-        id,
-        userId: session.user.id,
-      },
-    });
-
+    // Verify user has access to this workspace
+    const workspace = await authorizeWorkspaceAccess(id, session.user.id);
     if (!workspace) {
-      return new Response("Workspace not found", { status: 404 });
+      return NextResponse.json(
+        { error: "You are not authorized to access this workspace" },
+        { status: 403 }
+      );
     }
 
     if (workspace.status === "RUNNING") {

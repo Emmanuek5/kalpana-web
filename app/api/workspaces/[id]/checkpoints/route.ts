@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { checkpointService } from "@/lib/checkpoint-service";
+import { authorizeWorkspaceAccess } from "@/lib/workspace-auth";
 
 // POST /api/workspaces/:id/checkpoints - Create a checkpoint
 export async function POST(
@@ -22,6 +23,15 @@ export async function POST(
       return NextResponse.json(
         { error: "messageId is required" },
         { status: 400 }
+      );
+    }
+    
+    // Verify user has access to this workspace
+    const workspace = await authorizeWorkspaceAccess(workspaceId, session.user.id);
+    if (!workspace) {
+      return NextResponse.json(
+        { error: "You are not authorized to access this workspace" },
+        { status: 403 }
       );
     }
 
@@ -58,6 +68,15 @@ export async function GET(
     }
 
     const { id: workspaceId } = await context.params;
+    
+    // Verify user has access to this workspace
+    const workspace = await authorizeWorkspaceAccess(workspaceId, session.user.id);
+    if (!workspace) {
+      return NextResponse.json(
+        { error: "You are not authorized to access this workspace" },
+        { status: 403 }
+      );
+    }
 
     // List checkpoints
     const checkpoints = await checkpointService.listCheckpoints(workspaceId);

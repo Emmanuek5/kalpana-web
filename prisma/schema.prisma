@@ -14,19 +14,16 @@ model User {
   image               String?
   emailVerified       Boolean     @default(false)
   
-  // OAuth
-  githubId            String?     @unique
-  githubToken         String?     // Encrypted
-  
+
   // OpenRouter settings
-  openrouterApiKey    String?     // User's personal OpenRouter API key
-  favoriteModels      String[]    @default([]) // Array of favorite model IDs (max 10)
-  defaultModel        String?     // Default model to use in chat
+  openrouterApiKey    String?
+  favoriteModels      String[]    @default([])
+  defaultModel        String?
   
   // Relations
   workspaces          Workspace[]
   sessions            Session[]
-  accounts            Account[]
+  accounts            Account[]   // ← This is where OAuth data is stored
   presets             Preset[]
   domains             Domain[]
   agents              Agent[]
