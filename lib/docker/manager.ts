@@ -11,12 +11,20 @@ export interface WorkspaceContainer {
   workspaceId: string;
 }
 
+export interface EdgeRuntimeContainer {
+  containerId: string;
+  port: number;
+  status: string;
+}
+
 export class DockerManager {
   private docker: Docker;
   private portManager: PortManager;
+  private baseDomain?: string;
   private static buildInProgress: Promise<void> | null = null;
 
   constructor() {
+    this.baseDomain = process.env.KALPANA_BASE_DOMAIN;
     // Connect to Docker honoring DOCKER_HOST when present
     const envHost = process.env.DOCKER_HOST;
 
@@ -1075,6 +1083,260 @@ export class DockerManager {
         console.error('Error stopping Socket.io:', error);
       }
     }
+  }
+
+  /**
+   * Ensure edge runtime container is running
+   */
+  async ensureEdgeRuntime(): Promise<EdgeRuntimeContainer> {
+    const containerName = 'kalpana-edge-runtime';
+    const runtimePort = 3003;
+
+    try {
+      // Check if container already exists
+      const container = this.docker.getContainer(containerName);
+      const info = await container.inspect();
+
+      if (info.State.Running) {
+        console.log('✅ Edge runtime container already running');
+        
+        // Ensure connected to Traefik if base domain is configured
+        if (this.baseDomain) {
+          const { traefikManager } = await import("./traefik-manager");
+          try {
+            await traefikManager.ensureTraefik();
+            await traefikManager.connectToNetwork(info.Id);
+          } catch (error) {
+            console.error("Failed to connect edge runtime to Traefik:", error);
+          }
+        }
+        
+        return {
+          containerId: info.Id,
+          port: runtimePort,
+          status: 'running',
+        };
+      }
+
+      // Start if stopped
+      await container.start();
+      console.log('✅ Started existing edge runtime container');
+      
+      // Wait for runtime to be ready
+      await this.waitForEdgeRuntime(runtimePort);
+      
+      // Connect to Traefik if base domain is configured
+      if (this.baseDomain) {
+        const { traefikManager } = await import("./traefik-manager");
+        try {
+          await traefikManager.ensureTraefik();
+          await traefikManager.connectToNetwork(info.Id);
+        } catch (error) {
+          console.error("Failed to connect edge runtime to Traefik:", error);
+        }
+      }
+      
+      return {
+        containerId: info.Id,
+        port: runtimePort,
+        status: 'running',
+      };
+    } catch (error: any) {
+      if (error.statusCode === 404) {
+        // Container doesn't exist, create it
+        console.log('📦 Creating edge runtime container...');
+
+        // Build image if not present
+        await this.ensureEdgeRuntimeImage();
+
+        // Base labels
+        const labels: Record<string, string> = {
+          'kalpana.managed': 'true',
+          'kalpana.service': 'edge-runtime',
+          'traefik.enable': 'true',
+          'traefik.http.services.edge-runtime.loadbalancer.server.port': '3003',
+        };
+
+        // Always use bridge network for port bindings
+        // Traefik network will be added as secondary network if needed
+        const container = await this.docker.createContainer({
+          Image: 'kalpana/edge-runtime:latest',
+          name: containerName,
+          ExposedPorts: {
+            '3003/tcp': {},
+          },
+          HostConfig: {
+            PortBindings: {
+              '3003/tcp': [{ HostPort: runtimePort.toString() }],
+            },
+            NetworkMode: 'bridge',
+            RestartPolicy: {
+              Name: 'unless-stopped',
+            },
+            Memory: 512 * 1024 * 1024, // 512MB
+            AutoRemove: false,
+          },
+          Labels: labels,
+        });
+
+        await container.start();
+        console.log('✅ Edge runtime container created and started');
+
+        // Wait for runtime to be ready
+        await this.waitForEdgeRuntime(runtimePort);
+
+        // Ensure Traefik connection if base domain is configured
+        if (this.baseDomain) {
+          const { traefikManager } = await import("./traefik-manager");
+          try {
+            await traefikManager.ensureTraefik();
+            await traefikManager.connectToNetwork(container.id);
+            console.log('✅ Edge runtime connected to Traefik network');
+          } catch (error) {
+            console.error("Failed to connect edge runtime to Traefik:", error);
+          }
+        }
+
+        return {
+          containerId: container.id,
+          port: runtimePort,
+          status: 'running',
+        };
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Ensure edge runtime image exists
+   */
+  private async ensureEdgeRuntimeImage(): Promise<void> {
+    const imageName = 'kalpana/edge-runtime:latest';
+
+    // Check if image exists
+    const images = await this.docker.listImages({
+      filters: { reference: [imageName] } as any,
+    });
+
+    if (images && images.length > 0) {
+      console.log('✅ Edge runtime image already exists');
+      return;
+    }
+
+    console.log('🔨 Building edge runtime image...');
+
+    // Find Dockerfile location
+    const contextPath = path.resolve(
+      process.cwd(),
+      'lib/docker/containers/edge-runtime'
+    );
+
+    if (!fs.existsSync(path.join(contextPath, 'Dockerfile'))) {
+      throw new Error(
+        `Edge runtime Dockerfile not found at ${contextPath}`
+      );
+    }
+
+    // Build image
+    const tar = await import('tar-fs');
+    const fsTar = tar.pack(contextPath);
+
+    await new Promise<void>((resolve, reject) => {
+      this.docker.buildImage(
+        fsTar as unknown as NodeJS.ReadableStream,
+        { t: imageName },
+        (err, stream) => {
+          if (err || !stream) return reject(err);
+          this.docker.modem.followProgress(
+            stream,
+            (buildErr: any) => (buildErr ? reject(buildErr) : resolve()),
+            (event: any) => {
+              if (event.stream) {
+                process.stdout.write(event.stream);
+              }
+            }
+          );
+        }
+      );
+    });
+
+    console.log('✅ Edge runtime image built successfully');
+  }
+
+  /**
+   * Wait for edge runtime to be ready
+   */
+  private async waitForEdgeRuntime(port: number, maxAttempts = 30): Promise<void> {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const response = await fetch(`http://localhost:${port}/health`);
+        if (response.ok) {
+          console.log('✅ Edge runtime is ready');
+          return;
+        }
+      } catch (error) {
+        if (i < maxAttempts - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+    }
+
+    throw new Error('Edge runtime failed to start within timeout');
+  }
+
+  /**
+   * Stop edge runtime container
+   */
+  async stopEdgeRuntime(): Promise<void> {
+    try {
+      const container = this.docker.getContainer('kalpana-edge-runtime');
+      await container.stop();
+      console.log('🛑 Edge runtime container stopped');
+    } catch (error: any) {
+      if (error.statusCode !== 404) {
+        console.error('Error stopping edge runtime:', error);
+      }
+    }
+  }
+
+  /**
+   * Execute function in edge runtime
+   */
+  async executeEdgeFunction(
+    code: string,
+    handler: string,
+    request: any,
+    envVars: Record<string, string>,
+    timeout: number,
+    memory: number
+  ): Promise<any> {
+    // Ensure runtime is running
+    const runtime = await this.ensureEdgeRuntime();
+
+    // Send execution request
+    const response = await fetch(`http://localhost:${runtime.port}/execute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        code,
+        handler,
+        request,
+        envVars,
+        timeout,
+        memory,
+      }),
+    });
+
+    const result = await response.json();
+
+    if (!result.success) {
+      throw new Error(result.error || 'Execution failed');
+    }
+
+    return result;
   }
 }
 

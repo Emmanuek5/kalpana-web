@@ -269,6 +269,33 @@ export class TraefikManager {
   }
 
   /**
+   * Generate Traefik labels for a bucket
+   * Buckets use MinIO S3 API on port 9000
+   */
+  generateBucketLabels(
+    bucketId: string,
+    subdomain: string,
+    domain: string
+  ): Record<string, string> {
+    const routerName = `bucket-${bucketId}`;
+    const serviceName = `bucket-${bucketId}`;
+    const host = `${subdomain}.${domain}`;
+
+    return {
+      "traefik.enable": "true",
+      "kalpana.bucket.id": bucketId,
+      [`traefik.http.routers.${routerName}.rule`]: `Host(\`${host}\`)`,
+      [`traefik.http.routers.${routerName}.entrypoints`]: "web,websecure",
+      [`traefik.http.routers.${routerName}.tls`]: "true",
+      [`traefik.http.routers.${routerName}.tls.certresolver`]: "letsencrypt",
+      [`traefik.http.services.${serviceName}.loadbalancer.server.port`]: "9000",
+      // Add middleware to handle S3 path-style requests
+      [`traefik.http.routers.${routerName}.middlewares`]: `${routerName}-headers`,
+      [`traefik.http.middlewares.${routerName}-headers.headers.customrequestheaders.X-Forwarded-Proto`]: "https",
+    };
+  }
+
+  /**
    * Get deployment URL
    * @param subdomain - The subdomain (e.g., "api")
    * @param domain - The domain from DATABASE (e.g., "example.com")
@@ -279,6 +306,66 @@ export class TraefikManager {
       return `https://${subdomain}.${domain}`;
     }
     return ""; // Port-based access
+  }
+
+  /**
+   * Generate Traefik labels for an edge function
+   * Edge functions route through the shared runtime container
+   */
+  generateEdgeFunctionLabels(
+    functionId: string,
+    subdomain: string,
+    domain: string,
+    path?: string
+  ): Record<string, string> {
+    const routerName = `function-${functionId}`;
+    const serviceName = `edge-runtime`; // Shared service
+    const host = `${subdomain}.${domain}`;
+
+    const labels: Record<string, string> = {
+      "traefik.enable": "true",
+      "kalpana.function.id": functionId,
+      [`traefik.http.routers.${routerName}.rule`]: path
+        ? `Host(\`${host}\`) && PathPrefix(\`${path}\`)`
+        : `Host(\`${host}\`)`,
+      [`traefik.http.routers.${routerName}.entrypoints`]: "web,websecure",
+      [`traefik.http.routers.${routerName}.tls`]: "true",
+      [`traefik.http.routers.${routerName}.tls.certresolver`]: "letsencrypt",
+      [`traefik.http.services.${serviceName}.loadbalancer.server.port`]: "3003",
+      // Add middleware to forward function ID
+      [`traefik.http.routers.${routerName}.middlewares`]: `${routerName}-headers`,
+      [`traefik.http.middlewares.${routerName}-headers.headers.customrequestheaders.X-Function-Id`]: functionId,
+    };
+
+    return labels;
+  }
+
+  /**
+   * Get bucket URL
+   * @param subdomain - The bucket subdomain
+   * @param domain - The domain from DATABASE
+   * @returns Full URL for bucket access
+   */
+  getBucketUrl(subdomain: string, domain?: string): string {
+    if (domain) {
+      return `https://${subdomain}.${domain}`;
+    }
+    return ""; // Port-based access
+  }
+
+  /**
+   * Get edge function URL
+   * @param subdomain - The function subdomain
+   * @param domain - The domain from DATABASE
+   * @param path - Optional path prefix
+   * @returns Full URL for function access
+   */
+  getEdgeFunctionUrl(subdomain: string, domain?: string, path?: string): string {
+    if (domain) {
+      const baseUrl = `https://${subdomain}.${domain}`;
+      return path ? `${baseUrl}${path}` : baseUrl;
+    }
+    return ""; // No direct access without domain
   }
 }
 

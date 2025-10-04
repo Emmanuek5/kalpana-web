@@ -4,7 +4,7 @@ import Docker from "dockerode";
 
 
 
-const UNASSINGABLE_PORTS = [3002, 3003];
+const UNASSINGABLE_PORTS = [3002, 3003, 3004];
 export class PortManager {
   private minPort: number;
   private maxPort: number;

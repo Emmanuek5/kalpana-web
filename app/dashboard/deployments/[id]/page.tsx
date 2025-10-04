@@ -545,12 +545,31 @@ export default function DeploymentDetailPage() {
 
   const getDeploymentUrl = () => {
     if (!deployment) return null;
+    
+    // Priority 1: Custom domain
     if (deployment.domain && deployment.subdomain) {
       return `https://${deployment.subdomain}.${deployment.domain.domain}`;
-    } else if (deployment.exposedPort) {
+    }
+    
+    // Priority 2: Base domain
+    if (process.env.NEXT_PUBLIC_BASE_DOMAIN) {
+      return `https://${deployment.id}.${process.env.NEXT_PUBLIC_BASE_DOMAIN}`;
+    }
+    
+    // Priority 3: Port access
+    if (deployment.exposedPort) {
       return `http://localhost:${deployment.exposedPort}`;
     }
+    
     return null;
+  };
+
+  const getUrlLabel = () => {
+    if (!deployment) return "";
+    if (deployment.domain && deployment.subdomain) return "Custom Domain";
+    if (process.env.NEXT_PUBLIC_BASE_DOMAIN) return "Base Domain";
+    if (deployment.exposedPort) return "Local Port";
+    return "";
   };
 
   if (loading || !deployment) {
@@ -655,15 +674,20 @@ export default function DeploymentDetailPage() {
           {getDeploymentUrl() && (
             <div className="flex items-center gap-2 text-sm">
               <Globe className="h-4 w-4 text-zinc-500" />
-              <a
-                href={getDeploymentUrl()!}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1"
-              >
-                {getDeploymentUrl()}
-                <ExternalLink className="h-3 w-3" />
-              </a>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-500">
+                  {getUrlLabel()}:
+                </span>
+                <a
+                  href={getDeploymentUrl()!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1"
+                >
+                  {getDeploymentUrl()}
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
             </div>
           )}
 

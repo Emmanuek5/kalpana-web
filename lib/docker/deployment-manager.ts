@@ -20,8 +20,10 @@ export interface DeploymentConfig {
 export class DeploymentManager {
   private docker: Docker;
   private portManager: PortManager;
+  private baseDomain?: string;
 
   constructor() {
+    this.baseDomain = process.env.KALPANA_BASE_DOMAIN;
     const envHost = process.env.DOCKER_HOST;
 
     if (envHost && envHost.length > 0) {
@@ -478,20 +480,35 @@ export class DeploymentManager {
       const domain = deployment.domain;
       let exposedPort: number | undefined;
 
-      if (!domain) {
+      // Determine subdomain and domain for Traefik
+      let traefikSubdomain: string | undefined;
+      let traefikDomain: string | undefined;
+
+      // Priority 1: Custom domain if provided
+      if (domain && deployment.subdomain) {
+        traefikSubdomain = deployment.subdomain;
+        traefikDomain = domain.domain;
+      }
+      // Priority 2: Base domain with deployment ID as subdomain
+      else if (this.baseDomain) {
+        traefikSubdomain = deployment.id;
+        traefikDomain = this.baseDomain;
+      }
+
+      // Allocate port if not using any domain
+      if (!domain && !this.baseDomain) {
         const ports = await this.portManager.allocatePorts();
         exposedPort = ports.vscodePort;
         await onLog?.(`📍 Allocated port: ${exposedPort}`);
       }
 
-      // Generate Traefik labels if using domain/subdomain routing
       const labels =
-        domain && deployment.subdomain
+        traefikSubdomain && traefikDomain
           ? traefikManager.generateLabels(
               deployment.id,
-              deployment.subdomain,
+              traefikSubdomain,
               deployment.port,
-              domain.domain
+              traefikDomain
             )
           : {
               "kalpana.deployment.id": deployment.id,
@@ -517,28 +534,22 @@ export class DeploymentManager {
         },
       };
 
-      // Set up networking
-      if (domain) {
-        containerConfig.NetworkingConfig = {
-          EndpointsConfig: {
-            traefik: {},
-          },
-        };
-        containerConfig.HostConfig = {
-          NetworkMode: "traefik",
-          RestartPolicy: {
-            Name: "unless-stopped",
-          },
-        };
-      } else if (exposedPort) {
-        containerConfig.HostConfig = {
-          PortBindings: {
+      // Set up networking - always use bridge for port bindings
+      // Traefik network will be added as secondary network if needed
+      containerConfig.HostConfig = {
+        RestartPolicy: {
+          Name: "unless-stopped",
+        },
+        NetworkMode: "bridge",
+      };
+
+      // Add port bindings if not using custom domain (base domain still needs ports for internal access)
+      if (!domain || this.baseDomain) {
+        if (exposedPort) {
+          containerConfig.HostConfig.PortBindings = {
             [`${deployment.port}/tcp`]: [{ HostPort: exposedPort.toString() }],
-          },
-          RestartPolicy: {
-            Name: "unless-stopped",
-          },
-        };
+          };
+        }
       }
 
       const deployContainer = await this.docker.createContainer(
@@ -634,12 +645,28 @@ export class DeploymentManager {
         // Container might not exist
       }
     }
+
+    // Determine subdomain and domain for Traefik
+    let traefikSubdomain: string | undefined;
+    let traefikDomain: string | undefined;
+
+    // Priority 1: Custom domain if provided
+    if (domain && deployment.subdomain) {
+      traefikSubdomain = deployment.subdomain;
+      traefikDomain = domain.domain;
+    }
+    // Priority 2: Base domain with deployment ID as subdomain
+    else if (this.baseDomain) {
+      traefikSubdomain = deploymentId;
+      traefikDomain = this.baseDomain;
+    }
+
     let exposedPort: number | undefined;
 
-    // Allocate port if not using domain/Traefik
-    if (!domain) {
+    // Allocate port if not using any domain
+    if (!domain && !this.baseDomain) {
       const ports = await this.portManager.allocatePorts();
-      exposedPort = ports.vscodePort; // Reuse port allocation logic
+      exposedPort = ports.vscodePort;
     }
 
     // Parse and decrypt environment variables
@@ -656,14 +683,14 @@ export class DeploymentManager {
     // Generate container name
     const containerName = `deployment-${deploymentId}`;
 
-    // Generate Traefik labels if using domain/subdomain routing
+    // Generate Traefik labels if any domain is configured
     const labels =
-      domain && deployment.subdomain && deployment.port
+      traefikSubdomain && traefikDomain && deployment.port
         ? traefikManager.generateLabels(
             deploymentId,
-            deployment.subdomain,
+            traefikSubdomain,
             deployment.port,
-            domain.domain
+            traefikDomain
           )
         : {
             "kalpana.deployment.id": deploymentId,
@@ -688,11 +715,17 @@ export class DeploymentManager {
       },
     };
 
-    // Add port binding if not using domain/Traefik
-    if (!domain && exposedPort) {
-      containerConfig.HostConfig.PortBindings = {
-        [`${deployment.port}/tcp`]: [{ HostPort: exposedPort.toString() }],
-      };
+    // Set up networking - always use bridge for port bindings
+    // Traefik network will be added as secondary network if needed
+    containerConfig.HostConfig.NetworkMode = "bridge";
+    
+    // Add port bindings if not using custom domain
+    if (!domain || this.baseDomain) {
+      if (exposedPort) {
+        containerConfig.HostConfig.PortBindings = {
+          [`${deployment.port}/tcp`]: [{ HostPort: exposedPort.toString() }],
+        };
+      }
     }
 
     const container = await this.docker.createContainer(containerConfig);
@@ -700,12 +733,18 @@ export class DeploymentManager {
 
     await onLog?.("Deployment container started");
 
-    // Connect to Traefik network if using domain/subdomain routing
+    // Connect to Traefik network if any domain is configured
     if (domain && deployment.subdomain) {
       await traefikManager.ensureTraefik();
       await traefikManager.connectToNetwork(container.id);
       await onLog?.(
         `Configured subdomain: ${deployment.subdomain}.${domain.domain}`
+      );
+    } else if (this.baseDomain) {
+      await traefikManager.ensureTraefik();
+      await traefikManager.connectToNetwork(container.id);
+      await onLog?.(
+        `Configured base domain: ${deployment.id}.${this.baseDomain}`
       );
     }
 

@@ -26,6 +26,7 @@ import {
   Rocket,
   Users,
   Database,
+  HardDrive,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -43,6 +44,7 @@ import {
 } from "@/components/workspace/dynamic-tab-bar";
 import { LiveSharePanel } from "@/components/workspace/live-share-panel";
 import { DatabasesPanel } from "@/components/workspace/databases-panel";
+import { BucketsPanel } from "@/components/workspace/buckets-panel";
 
 // Custom scrollbar styles
 const scrollbarStyles = `
@@ -1761,6 +1763,13 @@ export default function WorkspacePage({
         icon: Database,
         priority: 40,
         content: <DatabasesPanel workspaceId={workspace?.id || ""} />,
+      },
+      {
+        id: "buckets",
+        label: "Buckets",
+        icon: HardDrive,
+        priority: 30,
+        content: <BucketsPanel workspaceId={workspace?.id || ""} />,
       },
     ];
 
